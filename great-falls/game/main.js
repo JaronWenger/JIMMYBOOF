@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 
 // Scene
@@ -23,9 +22,9 @@ renderer.toneMappingExposure = 1.2;
 document.body.appendChild(renderer.domElement);
 
 // Lighting
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const sun = new THREE.DirectionalLight(0xfff4e0, 2.0);
-sun.position.set(300, 500, 200);
+scene.add(new THREE.AmbientLight(0x8899bb, 0.25));
+const sun = new THREE.DirectionalLight(0xfff0cc, 3.0);
+sun.position.set(600, 300, 100);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.near = 1;
@@ -40,28 +39,41 @@ scene.add(sun);
 const textureLoader = new THREE.TextureLoader();
 const n1 = textureLoader.load('/Water_1_M_Normal.jpg', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(40, 40);
 });
 const n2 = textureLoader.load('/Water_2_M_Normal.jpg', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(30, 30);
+});
+const rockColor = textureLoader.load('/Rock_Color.png', t => {
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+});
+const rockNormal = textureLoader.load('/Rock_Normal.png', t => {
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+});
+const rockRoughness = textureLoader.load('/Rock_Roughness.png', t => {
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
 
 const rapidsMat = new THREE.ShaderMaterial({
   uniforms: {
-    time:      { value: 0 },
+    time:       { value: 0 },
     normalMap1: { value: n1 },
     normalMap2: { value: n2 },
-    sunDir:    { value: new THREE.Vector3(300, 500, 200).normalize() },
+    rockColorMap:     { value: rockColor },
+    rockNormalMap:    { value: rockNormal },
+    rockRoughnessMap: { value: rockRoughness },
+    sunDir:    { value: new THREE.Vector3(600, 300, 100).normalize() },
     sunColor:  { value: new THREE.Color(1.0, 0.98, 0.9) },
   },
+  vertexColors: true,
   vertexShader: /* glsl */`
     varying vec2 vUv;
     varying vec3 vWorldNormal;
     varying vec3 vWorldPos;
+    varying vec3 vColor;
 
     void main() {
       vUv = uv;
+      vColor = color.rgb;
       vec4 worldPos = modelMatrix * vec4(position, 1.0);
       vWorldPos = worldPos.xyz;
       vWorldNormal = normalize(mat3(modelMatrix) * normal);
@@ -72,43 +84,66 @@ const rapidsMat = new THREE.ShaderMaterial({
     uniform float time;
     uniform sampler2D normalMap1;
     uniform sampler2D normalMap2;
+    uniform sampler2D rockColorMap;
+    uniform sampler2D rockNormalMap;
+    uniform sampler2D rockRoughnessMap;
     uniform vec3 sunDir;
     uniform vec3 sunColor;
 
     varying vec2 vUv;
     varying vec3 vWorldNormal;
     varying vec3 vWorldPos;
+    varying vec3 vColor;
 
     void main() {
-      // Two normal layers scrolling at different speeds + directions
-      vec2 uv1 = vUv * 40.0 + vec2(0.0,  time * 0.4);
-      vec2 uv2 = vUv * 30.0 + vec2(time * 0.05, time * 0.25);
+      float waterMask = smoothstep(0.1, 0.5, vColor.r + vColor.g + vColor.b);
 
+      // Water normal maps
+      vec2 uv1 = vWorldPos.xz * 0.08 + vec2(0.0, time * -0.4);
+      vec2 uv2 = vWorldPos.xz * 0.06 + vec2(time * -0.05, time * -0.25);
       vec3 nt1 = texture2D(normalMap1, uv1).rgb * 2.0 - 1.0;
       vec3 nt2 = texture2D(normalMap2, uv2).rgb * 2.0 - 1.0;
       vec3 tn  = normalize(nt1 + nt2);
 
-      // Perturb surface normal
-      vec3 N = normalize(vWorldNormal + tn * 2.5);
+      // Rock textures
+      vec2 rockUv = vWorldPos.xz * 0.05;
+      vec3 rockSample = texture2D(rockColorMap, rockUv).rgb;
+      float rockLuma = dot(rockSample, vec3(0.299, 0.587, 0.114));
+      vec3 rockAlbedo = mix(vec3(rockLuma), rockSample, 0.2);
+      vec3 rockNorm   = texture2D(rockNormalMap, rockUv).rgb * 2.0 - 1.0;
+      float rockRough = texture2D(rockRoughnessMap, rockUv).r;
 
-      // Diffuse lighting
+      // Blended normal
+      vec3 N = normalize(mix(
+        vWorldNormal + rockNorm * 0.6,
+        vWorldNormal + tn * 2.5,
+        waterMask
+      ));
+
+      // Lighting
       float diff = max(dot(N, sunDir), 0.0);
-
-      // Specular (Blinn-Phong)
       vec3 viewDir = normalize(cameraPosition - vWorldPos);
       vec3 halfVec = normalize(sunDir + viewDir);
       float spec = pow(max(dot(N, halfVec), 0.0), 128.0);
 
-      // Foam: bright where normals are turbulent
-      float foam = smoothstep(0.2, 0.9, (nt1.z + nt2.z) * 0.5);
+      // Foam from normal map turbulence
+      float foam = smoothstep(0.0, 0.6, (nt1.z + nt2.z) * 0.5) * waterMask;
 
-      // Base water color — deep blue-green, foamy white on top
-      vec3 deepColor = vec3(0.05, 0.25, 0.4);
-      vec3 foamColor = vec3(0.85, 0.93, 1.0);
-      vec3 baseColor = mix(deepColor, foamColor, foam);
+      // Slope-based whiteness — steep = whitewater, flat = calm
+      float slope = 1.0 - abs(vWorldNormal.y);
+      float slopeFoam = smoothstep(0.001, 0.02, slope) * waterMask;
 
-      vec3 color = baseColor * (0.65 + 0.35 * diff) * sunColor
-                 + sunColor * spec * 0.9;
+      // Rock color with lighting
+      vec3 rockLit = rockAlbedo * (0.18 + 0.82 * diff) * sunColor
+                   + sunColor * spec * 0.05 * (1.0 - rockRough);
+
+      // Slope drives base color: flat = teal, steep = white
+      // Normal map adds subtle surface churn on top
+      vec3 waterColor = mix(vec3(0.08, 0.45, 0.42), vec3(1.0, 1.0, 1.0), slopeFoam);
+      waterColor = mix(waterColor, vec3(1.0, 1.0, 1.0), foam * 0.25);
+      vec3 waterLit = waterColor * (0.4 + 0.6 * diff) + vec3(spec * 0.9);
+
+      vec3 color = mix(rockLit, waterLit, waterMask);
 
       gl_FragColor = vec4(color, 1.0);
     }
@@ -117,11 +152,8 @@ const rapidsMat = new THREE.ShaderMaterial({
 
 // Terrain — apply rapids material
 let terrain = null;
-const draco = new DRACOLoader();
-draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 const loader = new GLTFLoader();
-loader.setDRACOLoader(draco);
-loader.load('./Untitled-draco.glb', ({ scene: gltf }) => {
+loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) {
       obj.geometry.computeVertexNormals(); // smooth faceted Delaunay normals
