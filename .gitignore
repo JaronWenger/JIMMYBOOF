@@ -10,6 +10,7 @@
 # 3D mesh exports (too large for GitHub)
 *.glb
 *.obj
+*.ply
 *.fbx
 *.mtl
 
