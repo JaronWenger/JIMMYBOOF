@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 
 // Scene
@@ -116,8 +117,11 @@ const rapidsMat = new THREE.ShaderMaterial({
 
 // Terrain — apply rapids material
 let terrain = null;
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 const loader = new GLTFLoader();
-loader.load('./Untitled.glb', ({ scene: gltf }) => {
+loader.setDRACOLoader(draco);
+loader.load('./Untitled-draco.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) {
       obj.geometry.computeVertexNormals(); // smooth faceted Delaunay normals
@@ -175,6 +179,9 @@ const worldUp = new THREE.Vector3(0, 1, 0);
 
 let mouseBtn = -1;
 let lastX = 0, lastY = 0;
+let mouseX = innerWidth / 2, mouseY = innerHeight / 2;
+
+window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
 
 renderer.domElement.addEventListener('mousedown', e => {
   if (flyMode) return;
@@ -225,8 +232,13 @@ window.addEventListener('wheel', e => {
   if (flyMode) {
     speed = Math.max(5, Math.min(500, speed - e.deltaY * 0.05));
   } else {
-    camera.getWorldDirection(fwd);
-    camera.position.addScaledVector(fwd, e.deltaY * 0.15);
+    const ndcX = (mouseX / innerWidth) * 2 - 1;
+    const ndcY = -(mouseY / innerHeight) * 2 + 1;
+    const zoomDir = new THREE.Vector3(ndcX, ndcY, 0.5)
+      .unproject(camera)
+      .sub(camera.position)
+      .normalize();
+    camera.position.addScaledVector(zoomDir, e.deltaY * 0.15);
   }
 }, { passive: true });
 
