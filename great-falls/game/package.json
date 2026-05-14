@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "deploy": "vite build && npx gh-pages -d dist"
+    "deploy": "vite build && printf '!*.glb\\n!*.png\\n!*.jpg\\n' > dist/.gitignore && npx gh-pages -d dist"
   },
   "dependencies": {
     "three": "^0.176.0"

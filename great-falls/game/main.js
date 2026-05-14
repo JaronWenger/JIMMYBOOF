@@ -37,19 +37,19 @@ scene.add(sun);
 
 // Rapids water shader — applied to the terrain mesh itself
 const textureLoader = new THREE.TextureLoader();
-const n1 = textureLoader.load('/Water_1_M_Normal.jpg', t => {
+const n1 = textureLoader.load('./Water_1_M_Normal.jpg', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
-const n2 = textureLoader.load('/Water_2_M_Normal.jpg', t => {
+const n2 = textureLoader.load('./Water_2_M_Normal.jpg', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
-const rockColor = textureLoader.load('/Rock_Color.png', t => {
+const rockColor = textureLoader.load('./Rock_Color.png', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
-const rockNormal = textureLoader.load('/Rock_Normal.png', t => {
+const rockNormal = textureLoader.load('./Rock_Normal.png', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
-const rockRoughness = textureLoader.load('/Rock_Roughness.png', t => {
+const rockRoughness = textureLoader.load('./Rock_Roughness.png', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
 
