@@ -8,11 +8,14 @@
 *.tiff
 
 # 3D mesh exports (too large for GitHub)
-*.glb
 *.obj
 *.ply
 *.fbx
 *.mtl
+
+# GLB files except the game mesh
+*.glb
+!great-falls/game/GREATFALLS.glb
 
 # Blender project files
 *.blend
