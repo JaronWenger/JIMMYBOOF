@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 
 // Scene
@@ -55,7 +60,7 @@ const rockRoughness = textureLoader.load('./Rock_Roughness.png', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
 
-const rapidsMat = new THREE.ShaderMaterial({
+const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
   uniforms: {
     time:       { value: 0 },
     normalMap1: { value: n1 },
@@ -98,6 +103,7 @@ const rapidsMat = new THREE.ShaderMaterial({
     varying vec3 vColor;
 
     void main() {
+      if (!gl_FrontFacing) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
       float waterMask = smoothstep(0.1, 0.5, vColor.r + vColor.g + vColor.b);
 
       // Water normal maps
@@ -108,7 +114,7 @@ const rapidsMat = new THREE.ShaderMaterial({
       vec3 tn  = normalize(nt1 + nt2);
 
       // Rock textures
-      vec2 rockUv = vWorldPos.xz * 0.05;
+      vec2 rockUv = vWorldPos.zx * 0.05;
       vec3 rockSample = texture2D(rockColorMap, rockUv).rgb;
       float rockLuma = dot(rockSample, vec3(0.299, 0.587, 0.114));
       vec3 rockAlbedo = mix(vec3(rockLuma), rockSample, 0.2);
@@ -159,6 +165,7 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) {
       obj.geometry.computeVertexNormals();
+      obj.geometry.computeBoundsTree();
       obj.material = rapidsMat;
       obj.castShadow = false;
       obj.receiveShadow = false;
@@ -166,6 +173,62 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   });
   terrain = gltf;
   scene.add(gltf);
+
+  // Black plane sized to terrain footprint
+  const box = new THREE.Box3().setFromObject(gltf);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  const underplane = new THREE.Mesh(
+    new THREE.PlaneGeometry(size.x, size.z),
+    new THREE.MeshBasicMaterial({ color: 0x000000 })
+  );
+  underplane.rotation.x = -Math.PI / 2;
+  underplane.position.set(center.x, box.min.y - 1, center.z);
+  scene.add(underplane);
+
+  // Build skirt from actual mesh boundary edges down to floor
+  let terrainMesh = null;
+  gltf.traverse(obj => { if (obj.isMesh && !terrainMesh) terrainMesh = obj; });
+  if (terrainMesh && terrainMesh.geometry.index) {
+    const geo = terrainMesh.geometry;
+    const posAttr = geo.attributes.position;
+    const idx = geo.index;
+    terrainMesh.updateWorldMatrix(true, false);
+
+    const edgeCount = new Map();
+    for (let i = 0; i < idx.count; i += 3) {
+      const a = idx.getX(i), b = idx.getX(i+1), c = idx.getX(i+2);
+      for (const [p, q] of [[a,b],[b,c],[c,a]]) {
+        const key = p < q ? `${p}_${q}` : `${q}_${p}`;
+        edgeCount.set(key, (edgeCount.get(key) || 0) + 1);
+      }
+    }
+
+    const verts = [], inds = [];
+    const vt = new THREE.Vector3();
+    const floorY = box.min.y - 1;
+
+    for (const [key, count] of edgeCount) {
+      if (count !== 1) continue;
+      const [a, b] = key.split('_').map(Number);
+      vt.fromBufferAttribute(posAttr, a).applyMatrix4(terrainMesh.matrixWorld);
+      const ax = vt.x, ay = vt.y, az = vt.z;
+      vt.fromBufferAttribute(posAttr, b).applyMatrix4(terrainMesh.matrixWorld);
+      const bx = vt.x, by = vt.y, bz = vt.z;
+      const base = verts.length / 3;
+      verts.push(ax, ay, az, bx, by, bz, ax, floorY, az, bx, floorY, bz);
+      inds.push(base, base+2, base+1, base+1, base+2, base+3);
+    }
+
+    const skirtGeo = new THREE.BufferGeometry();
+    skirtGeo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    skirtGeo.setIndex(inds);
+    scene.add(new THREE.Mesh(skirtGeo, new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })));
+  }
+
+  snapKayakerToTerrain();
   document.getElementById('loading').style.display = 'none';
   overlay.style.display = 'flex';
 });
@@ -176,6 +239,13 @@ let playMode = false;
 let kayakerYaw = 0; // facing downstream (+Z)
 const kayakMat = new THREE.MeshStandardMaterial({ color: 0x2255bb, roughness: 0.25, metalness: 0.1 });
 const kayakLoader = new GLTFLoader();
+function snapKayakerToTerrain() {
+  if (!kayakGltf || !terrain) return;
+  raycaster.set(new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z), downVec);
+  const hits = raycaster.intersectObject(terrain, true);
+  if (hits.length > 0) kayakGltf.position.y = hits[0].point.y + 0.6;
+}
+
 kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) obj.material = kayakMat;
@@ -185,37 +255,39 @@ kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
   gltf.rotation.y = Math.PI / 2;
   scene.add(gltf);
   kayakGltf = gltf;
+  snapKayakerToTerrain();
 });
 
 // Controls
 const fly = new PointerLockControls(camera, renderer.domElement);
 const overlay = document.getElementById('overlay');
 const modeLabel = document.getElementById('mode');
+const clipFade = document.getElementById('clip-fade');
 
 let flyMode = false;
 
-// Camera intro animation
-const introToPos  = new THREE.Vector3(16.4, -1.4, -249.2);
-const introToDir  = new THREE.Vector3(0.023, -0.171, 0.985);
 const introFromPos = new THREE.Vector3();
 const introFromQuat = new THREE.Quaternion();
-const introToQuat = new THREE.Quaternion();
+const introToPos   = new THREE.Vector3();
+const introToQuat  = new THREE.Quaternion();
 let introing = false, introT = 0;
 const INTRO_DUR = 2.8;
-
-// Compute target quaternion from direction vector
-{
-  const m = new THREE.Matrix4();
-  const right = new THREE.Vector3().crossVectors(introToDir, new THREE.Vector3(0,1,0)).normalize();
-  const up = new THREE.Vector3().crossVectors(right, introToDir).normalize();
-  m.makeBasis(right, up, introToDir.clone().negate());
-  introToQuat.setFromRotationMatrix(m);
-}
 
 document.getElementById('go').addEventListener('click', () => {
   overlay.style.display = 'none';
   introFromPos.copy(camera.position);
   introFromQuat.copy(camera.quaternion);
+
+  // Target = behind-kayak gameplay position
+  if (kayakGltf) {
+    const behind = new THREE.Vector3(-Math.sin(kayakerYaw), 0, -Math.cos(kayakerYaw));
+    introToPos.copy(kayakGltf.position).addScaledVector(behind, 6).add(new THREE.Vector3(0, 2.5, 0));
+    const lookTarget = kayakGltf.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+    smoothLookAt.copy(lookTarget);
+    const m = new THREE.Matrix4().lookAt(introToPos, lookTarget, new THREE.Vector3(0, 1, 0));
+    introToQuat.setFromRotationMatrix(m);
+  }
+
   introing = true;
   introT = 0;
 });
@@ -229,7 +301,13 @@ fly.addEventListener('lock', () => {
 fly.addEventListener('unlock', () => {
   flyMode = false;
   gravityMode = false;
-  modeLabel.textContent = 'ORBIT';
+  if (kayakGltf) {
+    smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+    playMode = true;
+    modeLabel.textContent = 'PLAY';
+  } else {
+    modeLabel.textContent = 'ORBIT';
+  }
 });
 
 function enterFly() { fly.lock(); }
@@ -240,7 +318,13 @@ const keys = new Set();
 window.addEventListener('keydown', e => {
   keys.add(e.code);
   if (e.code === 'KeyG' && flyMode) toggleGravity();
+  if (e.code === 'KeyF' && playMode) { playMode = false; fly.lock(); }
   if (e.code === 'Escape' && flyMode) exitFly();
+  if (e.code === 'Escape' && !flyMode) {
+    playMode = !playMode;
+    if (playMode && kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+    modeLabel.textContent = playMode ? 'PLAY' : 'ORBIT';
+  }
   if (e.code === 'KeyP') {
     const p = camera.position;
     const d = new THREE.Vector3();
@@ -345,6 +429,7 @@ function toggleGravity() {
 }
 
 const clock = new THREE.Clock();
+const smoothLookAt = new THREE.Vector3();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -361,6 +446,8 @@ function animate() {
     camera.position.lerpVectors(introFromPos, introToPos, ease);
     camera.quaternion.slerpQuaternions(introFromQuat, introToQuat, ease);
     if (t >= 1) { introing = false; playMode = true; }
+    renderer.render(scene, camera);
+    return;
   }
 
   // 3rd person kayak control
@@ -377,14 +464,18 @@ function animate() {
     if (keys.has('KeyW')) kayakGltf.position.addScaledVector(forward, moveSpeed * dt);
     if (keys.has('KeyS')) kayakGltf.position.addScaledVector(forward, -moveSpeed * dt);
 
-    // Snap kayaker to terrain surface
+    // Snap kayaker to terrain surface, store terrain Y for camera
+    let terrainY = kayakGltf.position.y;
     if (terrain) {
       raycaster.set(
         new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z),
         downVec
       );
       const hits = raycaster.intersectObject(terrain, true);
-      if (hits.length > 0) kayakGltf.position.y = hits[0].point.y + 0.6;
+      if (hits.length > 0) {
+        terrainY = hits[0].point.y;
+        kayakGltf.position.y += (terrainY + 0.6 - kayakGltf.position.y) * 0.18;
+      }
     }
 
     // Camera follows behind and above
@@ -392,12 +483,42 @@ function animate() {
     const targetCamPos = kayakGltf.position.clone()
       .addScaledVector(behind, 6)
       .add(new THREE.Vector3(0, 2.5, 0));
-    camera.position.lerp(targetCamPos, 0.08);
-    camera.lookAt(
-      kayakGltf.position.x,
-      kayakGltf.position.y + 1.5,
-      kayakGltf.position.z
+
+    // Lift camera above terrain at its own XZ position
+    if (terrain) {
+      raycaster.set(new THREE.Vector3(targetCamPos.x, targetCamPos.y + 30, targetCamPos.z), downVec);
+      const ch = raycaster.intersectObject(terrain, true);
+      if (ch.length > 0) targetCamPos.y = Math.max(targetCamPos.y, ch[0].point.y + 3.0);
+
+      // Line-of-sight from kayaker to camera — if blocked by a wall, push camera up
+      const origin = kayakGltf.position.clone().add(new THREE.Vector3(0, 1, 0));
+      const toCam = targetCamPos.clone().sub(origin);
+      const dist = toCam.length();
+      raycaster.set(origin, toCam.clone().normalize(), 0.3, dist);
+      const wall = raycaster.intersectObject(terrain, true);
+      if (wall.length > 0) {
+        const pushUp = Math.min((dist - wall[0].distance) + 4.0, 10);
+        targetCamPos.y = Math.max(targetCamPos.y, kayakGltf.position.y + pushUp);
+      }
+    }
+
+    camera.position.lerp(targetCamPos, 0.04);
+
+    // Push camera up if underground
+    if (terrain) {
+      raycaster.set(new THREE.Vector3(camera.position.x, camera.position.y + 30, camera.position.z), downVec);
+      const post = raycaster.intersectObject(terrain, true);
+      if (post.length > 0 && camera.position.y < post[0].point.y + 1.5) {
+        camera.position.y = post[0].point.y + 1.5;
+      }
+    }
+
+    // Smooth the lookAt so camera rotation doesn't jitter
+    smoothLookAt.lerp(
+      new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z),
+      0.08
     );
+    camera.lookAt(smoothLookAt);
   }
 
   if (flyMode && fly.isLocked) {

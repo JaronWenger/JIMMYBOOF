@@ -9,7 +9,8 @@
     "deploy": "vite build && printf '!*.glb\\n!*.png\\n!*.jpg\\n' > dist/.gitignore && npx gh-pages -d dist"
   },
   "dependencies": {
-    "three": "^0.176.0"
+    "three": "^0.176.0",
+    "three-mesh-bvh": "^0.9.10"
   },
   "devDependencies": {
     "vite": "^6.0.0"

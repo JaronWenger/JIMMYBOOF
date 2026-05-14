@@ -13,9 +13,10 @@
 *.fbx
 *.mtl
 
-# GLB files except the game mesh
+# GLB files except the game meshes
 *.glb
 !game/public/GREATFALLS.glb
+!game/public/Kayaker.glb
 
 # Blender project files
 *.blend
