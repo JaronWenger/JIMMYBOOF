@@ -41,6 +41,10 @@ node_modules/
 dist/
 .vite/
 
+# Claude
+.claude/
+CLAUDE.md
+
 # macOS
 .DS_Store
 **/.DS_Store
