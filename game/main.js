@@ -494,7 +494,6 @@ kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
 const fly = new PointerLockControls(camera, renderer.domElement);
 const overlay = document.getElementById('overlay');
 const modeLabel = document.getElementById('mode');
-const clipFade = document.getElementById('clip-fade');
 
 let flyMode = false;
 
@@ -549,6 +548,9 @@ function exitFly()  { fly.unlock(); }
 const keys = new Set();
 window.addEventListener('keydown', e => {
   keys.add(e.code);
+  if (e.code === 'Space' && playMode) triggerBoof();
+  if (e.code === 'KeyQ' && playMode) triggerRoll();
+  if (e.code === 'KeyR' && playMode) resetKayak();
   if (e.code === 'KeyG' && flyMode) toggleGravity();
   if (e.code === 'KeyF' && playMode) { playMode = false; fly.lock(); }
   if (e.code === 'Escape' && flyMode) exitFly();
@@ -647,6 +649,18 @@ window.addEventListener('resize', () => {
 
 // Gravity / walk
 let gravityMode = false;
+let currentSteepness = 0; // smoothed terrain slope at kayak — drives current force and camera lag
+let kayakVelX = 0, kayakVelZ = 0; // flow-induced XZ velocity
+let paddleSpeed = 0;              // player input speed with easing
+let boofPitch = 0, boofCooldown = 0, boofVelY = 0, isBoofing = false;
+let rockFactor = 0; // smoothed 0=water 1=rock at kayak position
+let sphereBowRock = 0, sphereSternRock = 0;
+let rollAngle = 0, rollTarget = 0; // 0 = upright, Math.PI = upside down
+let kayakAngVel = 0; // persistent angular velocity used when upside down
+// Flat-water flow direction from shader UV animation:
+// uv1 scrolls (0, -0.4) → world +Z*0.4; uv2 scrolls (-0.05,-0.25) → world (+X*0.05, +Z*0.25)
+// Combined and normalized: (0.077, 0, 0.997)
+const FLOW_X = 0.077, FLOW_Z = 0.997;
 let verticalVelocity = 0;
 const GRAVITY = -25;
 const PLAYER_HEIGHT = 1.8;
@@ -662,6 +676,32 @@ const debugBowMesh   = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color
 const debugSternMesh = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color: 0x0000ff }));
 scene.add(debugBowMesh);
 scene.add(debugSternMesh);
+
+function resetKayak() {
+  if (!kayakGltf) return;
+  kayakGltf.position.set(16, -1, -242);
+  kayakerYaw = 0;
+  kayakVelX = 0; kayakVelZ = 0; paddleSpeed = 0;
+  boofVelY = 0; isBoofing = false; boofPitch = 0; boofCooldown = 0;
+  rollAngle = 0; rollTarget = 0; kayakAngVel = 0;
+  snapKayakerToTerrain();
+  if (playMode) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+}
+
+function triggerRoll() {
+  rollTarget = rollTarget === 0 ? Math.PI : 0;
+  kayakAngVel = 0;
+}
+
+function triggerBoof() {
+  if (boofCooldown > 0 || !kayakGltf) return;
+  boofCooldown = 1.2;
+  boofPitch = -0.15;
+  boofVelY = 2.5;
+  isBoofing = true;
+  kayakVelX += Math.sin(kayakerYaw) * 3;
+  kayakVelZ += Math.cos(kayakerYaw) * 3;
+}
 
 function toggleGravity() {
   gravityMode = !gravityMode;
@@ -696,15 +736,21 @@ function animate() {
   if (playMode && kayakGltf) {
     const turnSpeed = 0.9;
     const moveSpeed = 5;
+    const upsideDown = rollTarget === Math.PI;
+    const flipMult   = upsideDown ? 2.5 : 1.0;
 
-    if (keys.has('KeyA')) kayakerYaw += turnSpeed * dt;
-    if (keys.has('KeyD')) kayakerYaw -= turnSpeed * dt;
+    if (!upsideDown) {
+      if (keys.has('KeyA')) kayakerYaw += turnSpeed * dt;
+      if (keys.has('KeyD')) kayakerYaw -= turnSpeed * dt;
+    }
 
     kayakFwd.set(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
 
-    // W/S move the kayak in XZ only — Y and rotation come entirely from the spheres
-    if (keys.has('KeyW')) { kayakGltf.position.x += Math.sin(kayakerYaw) * moveSpeed * dt; kayakGltf.position.z += Math.cos(kayakerYaw) * moveSpeed * dt; }
-    if (keys.has('KeyS')) { kayakGltf.position.x -= Math.sin(kayakerYaw) * moveSpeed * dt; kayakGltf.position.z -= Math.cos(kayakerYaw) * moveSpeed * dt; }
+    // W/S — ease into and out of full speed (disabled upside down)
+    const targetPaddle = (!upsideDown && keys.has('KeyW')) ? moveSpeed : (!upsideDown && keys.has('KeyS')) ? -moveSpeed : 0;
+    paddleSpeed += (targetPaddle - paddleSpeed) * Math.min(1, dt * 1.5);
+    kayakGltf.position.x += Math.sin(kayakerYaw) * paddleSpeed * dt;
+    kayakGltf.position.z += Math.cos(kayakerYaw) * paddleSpeed * dt;
 
     // Cast bow and stern straight down onto terrain, then position and rotate kayak from those hits
     if (terrain) {
@@ -721,16 +767,119 @@ function animate() {
       if (bowHits.length > 0 && sternHits.length > 0) {
         const bp = bowHits[0].point;
         const sp = sternHits[0].point;
+        const terrainY = (bp.y + sp.y) / 2 + 0.6 * Math.cos(rollAngle);
 
-        debugBowMesh.position.copy(bp);
-        debugSternMesh.position.copy(sp);
+        if (isBoofing) {
+          // Airborne: gravity drives Y; spheres travel with the kayak
+          boofVelY -= 18 * dt;
+          kayakGltf.position.y += boofVelY * dt;
+          if (kayakGltf.position.y <= terrainY) {
+            boofVelY = 0;
+            isBoofing = false;
+          }
+          debugBowMesh.position.copy(kayakGltf.position).addScaledVector(kayakFwd,  0.8);
+          debugSternMesh.position.copy(kayakGltf.position).addScaledVector(kayakFwd, -0.8);
+        } else {
+          // Grounded: snap to terrain contacts
+          kayakGltf.position.y = (bp.y + sp.y) / 2 + 0.6 * Math.cos(rollAngle);
+          debugBowMesh.position.copy(bp);
+          debugSternMesh.position.copy(sp);
+        }
 
-        // Y from sphere midpoint, pitch from sphere height difference
-        kayakGltf.position.y = (bp.y + sp.y) / 2 + 0.6;
         const dxz = Math.sqrt((bp.x - sp.x) ** 2 + (bp.z - sp.z) ** 2) || 0.001;
         const pitch = Math.atan2(sp.y - bp.y, dxz);
-        kayakGltf.rotation.set(0, kayakerYaw + Math.PI / 2, pitch, 'YXZ');
+        rollAngle += (rollTarget - rollAngle) * Math.min(1, dt * 5);
+        kayakGltf.rotation.set(rollAngle, kayakerYaw + Math.PI / 2, pitch + boofPitch, 'YXZ');
+
+        // Sphere-level rock vs water — drives repulsion and pivot rotation
+        const sphereBright = (hit) => {
+          const c = hit.object.geometry.attributes.color, f = hit.face;
+          return (c.getX(f.a)+c.getY(f.a)+c.getZ(f.a)+c.getX(f.b)+c.getY(f.b)+c.getZ(f.b)+c.getX(f.c)+c.getY(f.c)+c.getZ(f.c)) / 3;
+        };
+        const bowRock  = 1 - Math.max(0, Math.min(1, (sphereBright(bowHits[0])  - 0.1) / 0.4));
+        const sternRock = 1 - Math.max(0, Math.min(1, (sphereBright(sternHits[0]) - 0.1) / 0.4));
+
+        // Expose sphere rock values to the flow physics block below
+        sphereBowRock = bowRock;
+        sphereSternRock = sternRock;
+
+        if (!upsideDown) {
+          // Rock repels its sphere — net XZ push away from the rocky end
+          const repel = (sternRock - bowRock) * 6;
+          kayakVelX += kayakFwd.x * repel * dt;
+          kayakVelZ += kayakFwd.z * repel * dt;
+
+          // Asymmetric grip: water side pulls free end downstream, rocks pivot the other
+          const lateral = kayakVelX * Math.cos(kayakerYaw) - kayakVelZ * Math.sin(kayakerYaw);
+          kayakerYaw += lateral * (bowRock - sternRock) * 0.35 * dt;
+        } else {
+          // Upside down: rocks repel same as normal; spin only from asymmetric sphere contact
+          const repel = (sternRock - bowRock) * 6;
+          kayakVelX += kayakFwd.x * repel * dt;
+          kayakVelZ += kayakFwd.z * repel * dt;
+          const bowNorm2   = bowHits[0].face.normal.clone().transformDirection(bowHits[0].object.matrixWorld);
+          const sternNorm2 = sternHits[0].face.normal.clone().transformDirection(sternHits[0].object.matrixWorld);
+          const slopeDiff  = (1 - Math.abs(bowNorm2.y)) - (1 - Math.abs(sternNorm2.y));
+          kayakAngVel += (sternRock - bowRock) * 2.0 * dt;
+          kayakAngVel += slopeDiff * 0.4 * dt;
+          kayakAngVel = Math.max(-1.5, Math.min(1.5, kayakAngVel));
+          kayakAngVel *= 1 - 0.06 * dt;
+          kayakerYaw += kayakAngVel * dt;
+        }
       }
+    }
+
+    // Flow physics — flat water drifts gently downstream; whitewater gravity-slams the kayak
+    if (terrain) {
+      raycaster.set(new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z), downVec);
+      const cHits = raycaster.intersectObject(terrain, true);
+      if (cHits.length > 0) {
+        const wn = cHits[0].face.normal.clone().transformDirection(cHits[0].object.matrixWorld);
+        const slope = 1.0 - Math.abs(wn.y);
+        currentSteepness += (slope - currentSteepness) * Math.min(1, dt * 4);
+
+        // 0 in flat pools, ramps to 1 at steep rapids
+        const rapid = Math.min(1, Math.max(0, (currentSteepness - 0.04) / 0.46));
+
+        if (rapid < 0.02) {
+          // Flat water: drift in the direction the water animation flows
+          kayakVelX += (FLOW_X * 1.5 * flipMult - kayakVelX) * Math.min(1, dt * 2);
+          kayakVelZ += (FLOW_Z * 1.5 * flipMult - kayakVelZ) * Math.min(1, dt * 2);
+        } else {
+          // Whitewater: gravity along slope — velocity builds fast, feels like a hit
+          const il = 1.0 / Math.max(Math.sqrt(wn.x * wn.x + wn.z * wn.z), 1e-6);
+          const force = rapid * 100 * flipMult;
+          kayakVelX += wn.x * il * force * dt;
+          kayakVelZ += wn.z * il * force * dt;
+          // Drag caps terminal speed (~15 m/s at full rapid)
+          kayakVelX *= 1.0 - 2.0 * dt;
+          kayakVelZ *= 1.0 - 2.0 * dt;
+        }
+      }
+      // Rock friction / upside-down bump
+      if (cHits.length > 0) {
+        const f = cHits[0].face;
+        const col = cHits[0].object.geometry.attributes.color;
+        const brightness = (
+          col.getX(f.a) + col.getY(f.a) + col.getZ(f.a) +
+          col.getX(f.b) + col.getY(f.b) + col.getZ(f.b) +
+          col.getX(f.c) + col.getY(f.c) + col.getZ(f.c)
+        ) / 3;
+        const targetRock = 1 - Math.max(0, Math.min(1, (brightness - 0.1) / 0.4));
+        rockFactor += (targetRock - rockFactor) * Math.min(1, dt * 6);
+        // Both modes: beach when both spheres on rock; one in water slides free
+        const bothOnRock = Math.min(sphereBowRock, sphereSternRock);
+        const drag = bothOnRock * 10;
+        kayakVelX -= kayakVelX * drag * dt;
+        kayakVelZ -= kayakVelZ * drag * dt;
+        paddleSpeed -= paddleSpeed * drag * dt;
+      }
+
+      kayakGltf.position.x += kayakVelX * dt;
+      kayakGltf.position.z += kayakVelZ * dt;
+
+      boofPitch += (0 - boofPitch) * Math.min(1, dt * 4);
+      if (boofCooldown > 0) boofCooldown -= dt;
     }
 
     // Camera follows behind and above
@@ -756,7 +905,9 @@ function animate() {
       }
     }
 
-    camera.position.lerp(targetCamPos, 0.04);
+    // Camera lag: tight in whitewater, relaxed in flat pools
+    const camLerp = 0.04 + currentSteepness * 0.12;
+    camera.position.lerp(targetCamPos, camLerp);
 
     // Push camera up if underground
     if (terrain) {
@@ -770,7 +921,7 @@ function animate() {
     // Smooth the lookAt so camera rotation doesn't jitter
     smoothLookAt.lerp(
       new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z),
-      0.08
+      0.08 + currentSteepness * 0.12
     );
     camera.lookAt(smoothLookAt);
   }
