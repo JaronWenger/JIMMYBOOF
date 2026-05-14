@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 
+
 // Scene
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -9,7 +10,8 @@ scene.fog = new THREE.FogExp2(0xb9d8f0, 0.0006);
 
 // Camera
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 1, 5000);
-camera.position.set(0, 80, 200);
+camera.position.set(68.6, 29.1, -279.6);
+camera.lookAt(68.6 + -0.061, 29.1 + -0.056, -279.6 + 0.997);
 
 // Renderer
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -156,7 +158,7 @@ const loader = new GLTFLoader();
 loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) {
-      obj.geometry.computeVertexNormals(); // smooth faceted Delaunay normals
+      obj.geometry.computeVertexNormals();
       obj.material = rapidsMat;
       obj.castShadow = false;
       obj.receiveShadow = false;
@@ -165,6 +167,24 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   terrain = gltf;
   scene.add(gltf);
   document.getElementById('loading').style.display = 'none';
+  overlay.style.display = 'flex';
+});
+
+// Kayaker
+let kayakGltf = null;
+let playMode = false;
+let kayakerYaw = 0; // facing downstream (+Z)
+const kayakMat = new THREE.MeshStandardMaterial({ color: 0x2255bb, roughness: 0.25, metalness: 0.1 });
+const kayakLoader = new GLTFLoader();
+kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
+  gltf.traverse(obj => {
+    if (obj.isMesh) obj.material = kayakMat;
+  });
+  gltf.scale.setScalar(1);
+  gltf.position.set(16, -1, -242);
+  gltf.rotation.y = Math.PI / 2;
+  scene.add(gltf);
+  kayakGltf = gltf;
 });
 
 // Controls
@@ -174,8 +194,30 @@ const modeLabel = document.getElementById('mode');
 
 let flyMode = false;
 
-renderer.domElement.addEventListener('click', e => {
-  if (!flyMode) enterFly();
+// Camera intro animation
+const introToPos  = new THREE.Vector3(16.4, -1.4, -249.2);
+const introToDir  = new THREE.Vector3(0.023, -0.171, 0.985);
+const introFromPos = new THREE.Vector3();
+const introFromQuat = new THREE.Quaternion();
+const introToQuat = new THREE.Quaternion();
+let introing = false, introT = 0;
+const INTRO_DUR = 2.8;
+
+// Compute target quaternion from direction vector
+{
+  const m = new THREE.Matrix4();
+  const right = new THREE.Vector3().crossVectors(introToDir, new THREE.Vector3(0,1,0)).normalize();
+  const up = new THREE.Vector3().crossVectors(right, introToDir).normalize();
+  m.makeBasis(right, up, introToDir.clone().negate());
+  introToQuat.setFromRotationMatrix(m);
+}
+
+document.getElementById('go').addEventListener('click', () => {
+  overlay.style.display = 'none';
+  introFromPos.copy(camera.position);
+  introFromQuat.copy(camera.quaternion);
+  introing = true;
+  introT = 0;
 });
 
 fly.addEventListener('lock', () => {
@@ -199,6 +241,12 @@ window.addEventListener('keydown', e => {
   keys.add(e.code);
   if (e.code === 'KeyG' && flyMode) toggleGravity();
   if (e.code === 'Escape' && flyMode) exitFly();
+  if (e.code === 'KeyP') {
+    const p = camera.position;
+    const d = new THREE.Vector3();
+    camera.getWorldDirection(d);
+    console.log(`position: (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})  direction: (${d.x.toFixed(3)}, ${d.y.toFixed(3)}, ${d.z.toFixed(3)})`);
+  }
 });
 window.addEventListener('keyup', e => keys.delete(e.code));
 
@@ -304,6 +352,53 @@ function animate() {
 
   // Animate rapids
   rapidsMat.uniforms.time.value += dt;
+
+  // Intro fly-in
+  if (introing) {
+    introT += dt / INTRO_DUR;
+    const t = Math.min(introT, 1);
+    const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    camera.position.lerpVectors(introFromPos, introToPos, ease);
+    camera.quaternion.slerpQuaternions(introFromQuat, introToQuat, ease);
+    if (t >= 1) { introing = false; playMode = true; }
+  }
+
+  // 3rd person kayak control
+  if (playMode && kayakGltf) {
+    const turnSpeed = 0.9;
+    const moveSpeed = 5;
+
+    if (keys.has('KeyA')) kayakerYaw += turnSpeed * dt;
+    if (keys.has('KeyD')) kayakerYaw -= turnSpeed * dt;
+
+    kayakGltf.rotation.y = kayakerYaw + Math.PI / 2;
+
+    const forward = new THREE.Vector3(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
+    if (keys.has('KeyW')) kayakGltf.position.addScaledVector(forward, moveSpeed * dt);
+    if (keys.has('KeyS')) kayakGltf.position.addScaledVector(forward, -moveSpeed * dt);
+
+    // Snap kayaker to terrain surface
+    if (terrain) {
+      raycaster.set(
+        new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z),
+        downVec
+      );
+      const hits = raycaster.intersectObject(terrain, true);
+      if (hits.length > 0) kayakGltf.position.y = hits[0].point.y + 0.6;
+    }
+
+    // Camera follows behind and above
+    const behind = new THREE.Vector3(-Math.sin(kayakerYaw), 0, -Math.cos(kayakerYaw));
+    const targetCamPos = kayakGltf.position.clone()
+      .addScaledVector(behind, 6)
+      .add(new THREE.Vector3(0, 2.5, 0));
+    camera.position.lerp(targetCamPos, 0.08);
+    camera.lookAt(
+      kayakGltf.position.x,
+      kayakGltf.position.y + 1.5,
+      kayakGltf.position.z
+    );
+  }
 
   if (flyMode && fly.isLocked) {
     camera.getWorldDirection(fwd);
