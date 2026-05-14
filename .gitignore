@@ -1,0 +1,51 @@
+# LiDAR point clouds (gigabytes)
+*.laz
+*.las
+*.copc.laz
+
+# Raster DEMs
+*.tif
+*.tiff
+
+# 3D mesh exports (too large for GitHub)
+*.obj
+*.ply
+*.fbx
+*.mtl
+
+# GLB files except the game mesh
+*.glb
+!great-falls/game/GREATFALLS.glb
+
+# Blender project files
+*.blend
+*.blend1
+*.blend2
+*.bin
+
+# Mantaflow / fluid sim cache
+cache_fluid_*/
+*.vdb
+*.bobj.gz
+
+# Large texture packs
+great-falls/potomac-topo-2019/Rock022_4K-PNG/
+great-falls/potomac-topo-2019/*.png
+
+# QGIS
+*.vpc
+QGIS/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
