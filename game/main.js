@@ -50,6 +50,12 @@ const n1 = textureLoader.load('./Water_1_M_Normal.jpg', t => {
 const n2 = textureLoader.load('./Water_2_M_Normal.jpg', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
+const waterDetail = textureLoader.load('./Water Texture 002/Water_002_NORM.jpg', t => {
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+});
+const waterRoughness = textureLoader.load('./Water Texture 002/Water_002_ROUGH.jpg', t => {
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+});
 const rockColor = textureLoader.load('./Rock_Color.png', t => {
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
 });
@@ -65,22 +71,27 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
     time:       { value: 0 },
     normalMap1: { value: n1 },
     normalMap2: { value: n2 },
-    rockColorMap:     { value: rockColor },
-    rockNormalMap:    { value: rockNormal },
-    rockRoughnessMap: { value: rockRoughness },
+    rockColorMap:      { value: rockColor },
+    rockNormalMap:     { value: rockNormal },
+    rockRoughnessMap:  { value: rockRoughness },
+    waterDetailMap:    { value: waterDetail },
+    waterRoughnessMap: { value: waterRoughness },
     sunDir:    { value: new THREE.Vector3(600, 300, 100).normalize() },
     sunColor:  { value: new THREE.Color(1.0, 0.98, 0.9) },
   },
   vertexColors: true,
   vertexShader: /* glsl */`
+    attribute float wetRock;
     varying vec2 vUv;
     varying vec3 vWorldNormal;
     varying vec3 vWorldPos;
     varying vec3 vColor;
+    varying float vWetRock;
 
     void main() {
       vUv = uv;
       vColor = color.rgb;
+      vWetRock = wetRock;
       vec4 worldPos = modelMatrix * vec4(position, 1.0);
       vWorldPos = worldPos.xyz;
       vWorldNormal = normalize(mat3(modelMatrix) * normal);
@@ -94,6 +105,8 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
     uniform sampler2D rockColorMap;
     uniform sampler2D rockNormalMap;
     uniform sampler2D rockRoughnessMap;
+    uniform sampler2D waterDetailMap;
+    uniform sampler2D waterRoughnessMap;
     uniform vec3 sunDir;
     uniform vec3 sunColor;
 
@@ -101,6 +114,7 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
     varying vec3 vWorldNormal;
     varying vec3 vWorldPos;
     varying vec3 vColor;
+    varying float vWetRock;
 
     void main() {
       if (!gl_FrontFacing) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
@@ -121,10 +135,22 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
       vec3 rockNorm   = texture2D(rockNormalMap, rockUv).rgb * 2.0 - 1.0;
       float rockRough = texture2D(rockRoughnessMap, rockUv).r;
 
+      // Slope-based whiteness — steep = whitewater, flat = calm
+      float slope = 1.0 - abs(vWorldNormal.y);
+      float slopeFoam = smoothstep(0.001, 0.02, slope) * waterMask;
+
+      // Foam from normal map turbulence
+      float foam = smoothstep(0.0, 0.6, (nt1.z + nt2.z) * 0.5) * waterMask;
+
+      // Water 002 detail — only on calm water
+      vec2 detailUv = vWorldPos.zx * 0.12 + vec2(time * -0.3, 0.0);
+      vec3 wd = texture2D(waterDetailMap, detailUv).rgb * 2.0 - 1.0;
+      vec3 calmWaterNorm = normalize(tn + wd * (1.0 - slopeFoam) * 1.2);
+
       // Blended normal
       vec3 N = normalize(mix(
         vWorldNormal + rockNorm * 0.6,
-        vWorldNormal + tn * 2.5,
+        vWorldNormal + calmWaterNorm * 2.5,
         waterMask
       ));
 
@@ -134,13 +160,6 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
       vec3 halfVec = normalize(sunDir + viewDir);
       float spec = pow(max(dot(N, halfVec), 0.0), 128.0);
 
-      // Foam from normal map turbulence
-      float foam = smoothstep(0.0, 0.6, (nt1.z + nt2.z) * 0.5) * waterMask;
-
-      // Slope-based whiteness — steep = whitewater, flat = calm
-      float slope = 1.0 - abs(vWorldNormal.y);
-      float slopeFoam = smoothstep(0.001, 0.02, slope) * waterMask;
-
       // Rock color with lighting
       vec3 rockLit = rockAlbedo * (0.18 + 0.82 * diff) * sunColor
                    + sunColor * spec * 0.05 * (1.0 - rockRough);
@@ -148,8 +167,15 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
       // Slope drives base color: flat = teal, steep = white
       // Normal map adds subtle surface churn on top
       vec3 waterColor = mix(vec3(0.08, 0.45, 0.42), vec3(1.0, 1.0, 1.0), slopeFoam);
-      waterColor = mix(waterColor, vec3(1.0, 1.0, 1.0), foam * 0.25);
-      vec3 waterLit = waterColor * (0.4 + 0.6 * diff) + vec3(spec * 0.9);
+      waterColor = mix(waterColor, vec3(1.0, 1.0, 1.0), foam * 0.25 * slopeFoam);
+      float waterRough = texture2D(waterRoughnessMap, uv1).r;
+      float waterSpec = mix(spec * (1.0 - waterRough) * 1.2, spec * 0.9, slopeFoam);
+      vec3 waterLit = waterColor * (0.4 + 0.6 * diff) + vec3(waterSpec);
+
+      // Wet rock — exponential falloff: full effect at boundary, drops fast further out
+      float wetF = smoothstep(0.0, 0.88, vWetRock);
+      wetF = wetF * wetF * wetF;
+      rockLit *= 1.0 - wetF * 0.60 * (1.0 - waterMask);
 
       vec3 color = mix(rockLit, waterLit, waterMask);
 
@@ -158,6 +184,185 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
   `,
 });
 
+// Spray particle system
+const SPRAY_COUNT = 2000;
+const MIST_COUNT  = 5000;
+const sprayPos   = new Float32Array(SPRAY_COUNT * 3);
+const sprayVel   = new Float32Array(SPRAY_COUNT * 3);
+const sprayLife  = new Float32Array(SPRAY_COUNT);
+const sprayFloor = new Float32Array(SPRAY_COUNT).fill(-999);
+const sprayGeo   = new THREE.BufferGeometry();
+sprayGeo.setAttribute('position', new THREE.BufferAttribute(sprayPos, 3));
+const sprayMat   = new THREE.PointsMaterial({ color: 0xddf0f0, size: 0.08, transparent: true, opacity: 0.3, depthWrite: false, sizeAttenuation: true });
+const sprayMesh  = new THREE.Points(sprayGeo, sprayMat);
+sprayMesh.frustumCulled = false;
+scene.add(sprayMesh);
+
+const mistPos  = new Float32Array(MIST_COUNT * 3);
+const mistVel  = new Float32Array(MIST_COUNT * 3);
+const mistLife = new Float32Array(MIST_COUNT);
+const mistGeo  = new THREE.BufferGeometry();
+mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
+const mistMat  = new THREE.PointsMaterial({ color: 0xe8f4f4, size: 0.14, transparent: true, opacity: 0.1, depthWrite: false, sizeAttenuation: true });
+const mistMesh = new THREE.Points(mistGeo, mistMat);
+mistMesh.frustumCulled = false;
+scene.add(mistMesh);
+let spawnFlat  = [];
+let spawnCount = 0;
+let spawnCdf   = null;
+
+function initSpray(spawns) {
+  spawnFlat  = spawns;
+  spawnCount = spawns.length / 6;
+
+  // Build weighted CDF by local whitewater density (grid-based)
+  const GRID = 8; // world-unit cell size
+  const gridMap = new Map();
+  for (let i = 0; i < spawnCount; i++) {
+    const gx = Math.floor(spawnFlat[i*6]   / GRID);
+    const gz = Math.floor(spawnFlat[i*6+2] / GRID);
+    const key = gx * 100000 + gz;
+    gridMap.set(key, (gridMap.get(key) || 0) + 1);
+  }
+  const weights = new Float32Array(spawnCount);
+  let total = 0;
+  for (let i = 0; i < spawnCount; i++) {
+    const gx = Math.floor(spawnFlat[i*6]   / GRID);
+    const gz = Math.floor(spawnFlat[i*6+2] / GRID);
+    let count = 0;
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++)
+        count += gridMap.get((gx+dx)*100000 + (gz+dz)) || 0;
+    const steep = spawnFlat[i*6+5];
+    const w = count > 3 ? count * count * (1 + steep * 4) : 0;
+    weights[i] = w;
+    total += w;
+  }
+  spawnCdf = new Float32Array(spawnCount);
+  let acc = 0;
+  for (let i = 0; i < spawnCount; i++) {
+    acc += weights[i] / total;
+    spawnCdf[i] = acc;
+  }
+
+  for (let i = 0; i < SPRAY_COUNT; i++) sprayLife[i] = Math.random() * 1.2;
+  for (let i = 0; i < MIST_COUNT;  i++) mistLife[i]  = Math.random() * 2.0;
+}
+
+function weightedSpawnIndex() {
+  const r = Math.random();
+  let lo = 0, hi = spawnCount - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (spawnCdf[mid] < r) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+let sprayFrame = 0;
+
+function spawnParticle(i) {
+  const s = weightedSpawnIndex() * 6;
+  const px = spawnFlat[s]   + (Math.random()-0.5) * 0.8;
+  const py = spawnFlat[s+1] + Math.random() * 0.2;
+  const pz = spawnFlat[s+2] + (Math.random()-0.5) * 0.8;
+  const steep = spawnFlat[s+5];
+  sprayPos[i*3] = px; sprayPos[i*3+1] = py; sprayPos[i*3+2] = pz;
+  const flowSpeed = steep * (Math.random() * 3.0 + 1.5);
+  sprayVel[i*3]   = (Math.random()-0.5) * 1.0;
+  sprayVel[i*3+1] = steep * (Math.random() * 2.5 + 1.0);
+  sprayVel[i*3+2] = flowSpeed + (Math.random()-0.5) * 0.6; // always +Z downstream
+  sprayLife[i]    = 4.0; // long enough to complete full arc
+  sprayFloor[i]   = py - 0.3; // will be updated dynamically when falling
+}
+
+function updateSpray(dt) {
+  if (spawnCount === 0) return;
+  sprayFrame++;
+  for (let i = 0; i < SPRAY_COUNT; i++) {
+    sprayLife[i] -= dt;
+    if (sprayLife[i] <= 0) { spawnParticle(i); continue; }
+
+    sprayPos[i*3]   += sprayVel[i*3]   * dt;
+    sprayPos[i*3+1] += sprayVel[i*3+1] * dt;
+    sprayPos[i*3+2] += sprayVel[i*3+2] * dt;
+    sprayVel[i*3+1] -= 7 * dt; // softer gravity for a nice arc
+
+    // Floor check only while falling, spread across frames for perf
+    if (sprayVel[i*3+1] < 0 && terrain && (sprayFrame % 5 === i % 5)) {
+      raycaster.set(new THREE.Vector3(sprayPos[i*3], sprayPos[i*3+1] + 3, sprayPos[i*3+2]), downVec);
+      const hits = raycaster.intersectObject(terrain, true);
+      if (hits.length > 0 && sprayPos[i*3+1] <= hits[0].point.y + 0.15) {
+        spawnParticle(i);
+      }
+    }
+  }
+  sprayGeo.attributes.position.needsUpdate = true;
+
+  // Mist layer — wider spread, slower, longer life
+  for (let i = 0; i < MIST_COUNT; i++) {
+    mistLife[i] -= dt;
+    if (mistLife[i] <= 0) {
+      const s = weightedSpawnIndex() * 6;
+      mistPos[i*3]   = spawnFlat[s]   + (Math.random()-0.5) * 2.5;
+      mistPos[i*3+1] = spawnFlat[s+1] + Math.random() * 0.3;
+      mistPos[i*3+2] = spawnFlat[s+2] + (Math.random()-0.5) * 2.5;
+      mistVel[i*3]   = (Math.random()-0.5) * 0.6;
+      mistVel[i*3+1] = Math.random() * 1.5 + 0.3;
+      mistVel[i*3+2] = (Math.random() * 1.5 + 0.5);
+      mistLife[i]    = Math.random() * 2.0 + 1.0;
+    } else {
+      mistPos[i*3]   += mistVel[i*3]   * dt;
+      mistPos[i*3+1] += mistVel[i*3+1] * dt;
+      mistPos[i*3+2] += mistVel[i*3+2] * dt;
+      mistVel[i*3+1] -= 4 * dt;
+    }
+  }
+  mistGeo.attributes.position.needsUpdate = true;
+}
+
+// Spread "wet rock" outward from water boundary vertices, N face-layers deep
+function computeWetRock(geo, layers = 5, decay = 0.72) {
+  const idx = geo.index;
+  const col = geo.attributes.color;
+  if (!idx || !col) return;
+  const vCount = col.count;
+  const fCount = idx.count / 3;
+
+  const isWater = new Uint8Array(vCount);
+  for (let i = 0; i < vCount; i++)
+    isWater[i] = (col.getX(i) + col.getY(i) + col.getZ(i)) > 0.3 ? 1 : 0;
+
+  const wet = new Float32Array(vCount);
+  // Seed: rock vertices that share a face with a water vertex
+  for (let f = 0; f < fCount; f++) {
+    const a = idx.getX(f*3), b = idx.getX(f*3+1), c = idx.getX(f*3+2);
+    if (isWater[a] || isWater[b] || isWater[c]) {
+      if (!isWater[a]) wet[a] = 1.0;
+      if (!isWater[b]) wet[b] = 1.0;
+      if (!isWater[c]) wet[c] = 1.0;
+    }
+  }
+
+  // Propagate outward through rock faces
+  const tmp = new Float32Array(vCount);
+  for (let layer = 0; layer < layers; layer++) {
+    tmp.set(wet);
+    for (let f = 0; f < fCount; f++) {
+      const a = idx.getX(f*3), b = idx.getX(f*3+1), c = idx.getX(f*3+2);
+      if (isWater[a] || isWater[b] || isWater[c]) continue;
+      const mx = Math.max(wet[a], wet[b], wet[c]);
+      if (mx === 0) continue;
+      const s = mx * decay;
+      if (s > tmp[a]) tmp[a] = s;
+      if (s > tmp[b]) tmp[b] = s;
+      if (s > tmp[c]) tmp[c] = s;
+    }
+    wet.set(tmp);
+  }
+  geo.setAttribute('wetRock', new THREE.BufferAttribute(wet, 1));
+}
+
 // Terrain — apply rapids material
 let terrain = null;
 const loader = new GLTFLoader();
@@ -165,6 +370,7 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   gltf.traverse(obj => {
     if (obj.isMesh) {
       obj.geometry.computeVertexNormals();
+      computeWetRock(obj.geometry);
       obj.geometry.computeBoundsTree();
       obj.material = rapidsMat;
       obj.castShadow = false;
@@ -228,6 +434,31 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
     scene.add(new THREE.Mesh(skirtGeo, new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide })));
   }
 
+  // Extract whitewater vertices — store pos + flow direction + steepness (6 floats each)
+  const spraySpawns = [];
+  if (terrainMesh) {
+    const pA = terrainMesh.geometry.attributes.position;
+    const cA = terrainMesh.geometry.attributes.color;
+    const nA = terrainMesh.geometry.attributes.normal;
+    if (cA && nA) {
+      const sv = new THREE.Vector3();
+      for (let i = 0; i < pA.count; i += 4) {
+        const bright = cA.getX(i) + cA.getY(i) + cA.getZ(i);
+        const ny = Math.abs(nA.getY(i));
+        if (bright > 0.5 && ny < 0.92) {
+          sv.fromBufferAttribute(pA, i).applyMatrix4(terrainMesh.matrixWorld);
+          const steep = 1.0 - ny;
+          // flow dir = downhill = negative of normal's XZ projected
+          let fx = -nA.getX(i), fz = -nA.getZ(i);
+          const fl = Math.sqrt(fx*fx + fz*fz);
+          if (fl > 0) { fx /= fl; fz /= fl; }
+          spraySpawns.push(sv.x, sv.y, sv.z, fx, fz, steep);
+        }
+      }
+    }
+  }
+  initSpray(spraySpawns);
+
   snapKayakerToTerrain();
   document.getElementById('loading').style.display = 'none';
   overlay.style.display = 'flex';
@@ -255,6 +486,7 @@ kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
   gltf.rotation.y = Math.PI / 2;
   scene.add(gltf);
   kayakGltf = gltf;
+
   snapKayakerToTerrain();
 });
 
@@ -421,6 +653,15 @@ const PLAYER_HEIGHT = 1.8;
 const raycaster = new THREE.Raycaster();
 const downVec  = new THREE.Vector3(0, -1, 0);
 const flatFwd  = new THREE.Vector3();
+const kayakFwd = new THREE.Vector3();
+const kayakRgt = new THREE.Vector3();
+
+// Debug markers — scene-level, gravity-dropped onto terrain each frame
+const dbGeo = new THREE.SphereGeometry(0.2, 8, 8);
+const debugBowMesh   = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+const debugSternMesh = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color: 0x0000ff }));
+scene.add(debugBowMesh);
+scene.add(debugSternMesh);
 
 function toggleGravity() {
   gravityMode = !gravityMode;
@@ -437,6 +678,7 @@ function animate() {
 
   // Animate rapids
   rapidsMat.uniforms.time.value += dt;
+  updateSpray(dt);
 
   // Intro fly-in
   if (introing) {
@@ -458,30 +700,42 @@ function animate() {
     if (keys.has('KeyA')) kayakerYaw += turnSpeed * dt;
     if (keys.has('KeyD')) kayakerYaw -= turnSpeed * dt;
 
-    kayakGltf.rotation.y = kayakerYaw + Math.PI / 2;
+    kayakFwd.set(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
 
-    const forward = new THREE.Vector3(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
-    if (keys.has('KeyW')) kayakGltf.position.addScaledVector(forward, moveSpeed * dt);
-    if (keys.has('KeyS')) kayakGltf.position.addScaledVector(forward, -moveSpeed * dt);
+    // W/S move the kayak in XZ only — Y and rotation come entirely from the spheres
+    if (keys.has('KeyW')) { kayakGltf.position.x += Math.sin(kayakerYaw) * moveSpeed * dt; kayakGltf.position.z += Math.cos(kayakerYaw) * moveSpeed * dt; }
+    if (keys.has('KeyS')) { kayakGltf.position.x -= Math.sin(kayakerYaw) * moveSpeed * dt; kayakGltf.position.z -= Math.cos(kayakerYaw) * moveSpeed * dt; }
 
-    // Snap kayaker to terrain surface, store terrain Y for camera
-    let terrainY = kayakGltf.position.y;
+    // Cast bow and stern straight down onto terrain, then position and rotate kayak from those hits
     if (terrain) {
-      raycaster.set(
-        new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z),
-        downVec
-      );
-      const hits = raycaster.intersectObject(terrain, true);
-      if (hits.length > 0) {
-        terrainY = hits[0].point.y;
-        kayakGltf.position.y += (terrainY + 0.6 - kayakGltf.position.y) * 0.18;
+      const bowOrigin   = kayakGltf.position.clone().addScaledVector(kayakFwd,  0.8);
+      const sternOrigin = kayakGltf.position.clone().addScaledVector(kayakFwd, -0.8);
+      bowOrigin.y   += 20;
+      sternOrigin.y += 20;
+
+      raycaster.set(bowOrigin, downVec);
+      const bowHits = raycaster.intersectObject(terrain, true);
+      raycaster.set(sternOrigin, downVec);
+      const sternHits = raycaster.intersectObject(terrain, true);
+
+      if (bowHits.length > 0 && sternHits.length > 0) {
+        const bp = bowHits[0].point;
+        const sp = sternHits[0].point;
+
+        debugBowMesh.position.copy(bp);
+        debugSternMesh.position.copy(sp);
+
+        // Y from sphere midpoint, pitch from sphere height difference
+        kayakGltf.position.y = (bp.y + sp.y) / 2 + 0.6;
+        const dxz = Math.sqrt((bp.x - sp.x) ** 2 + (bp.z - sp.z) ** 2) || 0.001;
+        const pitch = Math.atan2(sp.y - bp.y, dxz);
+        kayakGltf.rotation.set(0, kayakerYaw + Math.PI / 2, pitch, 'YXZ');
       }
     }
 
     // Camera follows behind and above
-    const behind = new THREE.Vector3(-Math.sin(kayakerYaw), 0, -Math.cos(kayakerYaw));
     const targetCamPos = kayakGltf.position.clone()
-      .addScaledVector(behind, 6)
+      .addScaledVector(kayakFwd, -6)
       .add(new THREE.Vector3(0, 2.5, 0));
 
     // Lift camera above terrain at its own XZ position
