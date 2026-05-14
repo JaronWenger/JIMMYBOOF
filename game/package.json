@@ -1,0 +1,17 @@
+{
+  "name": "great-falls-game",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "deploy": "vite build && printf '!*.glb\\n!*.png\\n!*.jpg\\n' > dist/.gitignore && npx gh-pages -d dist"
+  },
+  "dependencies": {
+    "three": "^0.176.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

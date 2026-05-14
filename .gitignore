@@ -15,7 +15,7 @@
 
 # GLB files except the game mesh
 *.glb
-!great-falls/game/public/GREATFALLS.glb
+!game/public/GREATFALLS.glb
 
 # Blender project files
 *.blend
