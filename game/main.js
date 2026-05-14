@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { Line2 } from 'three/examples/jsm/lines/Line2.js';
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -526,15 +529,24 @@ document.getElementById('go').addEventListener('click', () => {
 fly.addEventListener('lock', () => {
   flyMode = true;
   overlay.style.display = 'none';
+  if (gravityMode && kayakGltf) {
+    camera.position.copy(kayakGltf.position).add(new THREE.Vector3(0, 1.6, 0));
+    const lookDir = new THREE.Vector3(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
+    camera.lookAt(camera.position.clone().add(lookDir));
+  }
   modeLabel.textContent = gravityMode ? 'WALK' : 'FLY';
 });
 
 fly.addEventListener('unlock', () => {
   flyMode = false;
   gravityMode = false;
+  walkVelX = 0; walkVelZ = 0;
+  if (carryingKayak) { carryingKayak = false; snapKayakerToTerrain(); }
+  hideRope(); walkWaterF = 0;
   if (kayakGltf) {
     smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
     playMode = true;
+    rollTarget = 0;
     modeLabel.textContent = 'PLAY';
   } else {
     modeLabel.textContent = 'ORBIT';
@@ -544,15 +556,62 @@ fly.addEventListener('unlock', () => {
 function enterFly() { fly.lock(); }
 function exitFly()  { fly.unlock(); }
 
+function skipIntro() {
+  if (!introing) return;
+  introing = false;
+  playMode = true;
+  camera.position.copy(introToPos);
+  camera.quaternion.copy(introToQuat);
+}
+renderer.domElement.addEventListener('click', skipIntro);
+
+
 // Keys
 const keys = new Set();
 window.addEventListener('keydown', e => {
   keys.add(e.code);
-  if (e.code === 'Space' && playMode) triggerBoof();
-  if (e.code === 'KeyQ' && playMode) triggerRoll();
+  if (e.code === 'Space' && introing) { skipIntro(); return; }
+  if (e.code === 'Space' && flyMode && gravityMode && isGrounded) { verticalVelocity = 10; isGrounded = false; }
+  if (e.code === 'Space' && playMode && !flyMode) triggerBoof();
+  if (e.code === 'KeyQ' && playMode && !flyMode) triggerRoll();
+  if (e.code === 'KeyQ' && flyMode && gravityMode && kayakGltf) {
+    if (!carryingKayak && camera.position.distanceTo(kayakGltf.position) < 5) {
+      carryingKayak = true;
+      rollTarget = 0; rollAngle = 0; kayakAngVel = 0;
+      hideRope();
+    } else if (!carryingKayak && !ropeActive) {
+      throwRope();
+    } else if (!carryingKayak && ropeActive) {
+      reelRope();
+    } else if (carryingKayak) {
+      carryingKayak = false;
+      camera.getWorldDirection(fwd);
+      // Place kayak directly ahead at chest height so it's seen straight on
+      kayakGltf.position.copy(camera.position)
+        .addScaledVector(fwd, 2.5)
+        .add(new THREE.Vector3(0, -0.3, 0));
+      const throwYaw = Math.atan2(fwd.x, fwd.z);
+      kayakerYaw = throwYaw;
+      kayakGltf.rotation.set(0, throwYaw + Math.PI / 2, 0, 'YXZ');
+      kayakVelX = fwd.x * 7;
+      kayakVelZ = fwd.z * 7;
+      boofVelY = 4;
+      isBoofing = true;
+    }
+  }
   if (e.code === 'KeyR' && playMode) resetKayak();
   if (e.code === 'KeyG' && flyMode) toggleGravity();
   if (e.code === 'KeyF' && playMode) { playMode = false; fly.lock(); }
+  if (e.code === 'KeyE' && playMode && kayakGltf && !flyMode) {
+    gravityMode = true;
+    rollTarget = Math.PI;
+    kayakAngVel = 0;
+    fly.lock();
+    // playMode stays true — kayak keeps simulating
+  }
+  if (e.code === 'KeyE' && flyMode && gravityMode && kayakGltf && !carryingKayak) {
+    if (camera.position.distanceTo(kayakGltf.position) < 5) fly.unlock();
+  }
   if (e.code === 'Escape' && flyMode) exitFly();
   if (e.code === 'Escape' && !flyMode) {
     playMode = !playMode;
@@ -624,12 +683,10 @@ window.addEventListener('mousemove', e => {
   }
 });
 
-// Scroll zoom
+// Scroll zoom (orbit only)
 let speed = 50;
 window.addEventListener('wheel', e => {
-  if (flyMode) {
-    speed = Math.max(5, Math.min(500, speed - e.deltaY * 0.05));
-  } else {
+  if (!flyMode) {
     const ndcX = (mouseX / innerWidth) * 2 - 1;
     const ndcY = -(mouseY / innerHeight) * 2 + 1;
     const zoomDir = new THREE.Vector3(ndcX, ndcY, 0.5)
@@ -662,6 +719,9 @@ let kayakAngVel = 0; // persistent angular velocity used when upside down
 // Combined and normalized: (0.077, 0, 0.997)
 const FLOW_X = 0.077, FLOW_Z = 0.997;
 let verticalVelocity = 0;
+let isGrounded = false;
+let walkVelX = 0, walkVelZ = 0, walkWaterF = 0;
+let carryingKayak = false;
 const GRAVITY = -25;
 const PLAYER_HEIGHT = 1.8;
 const raycaster = new THREE.Raycaster();
@@ -674,6 +734,8 @@ const kayakRgt = new THREE.Vector3();
 const dbGeo = new THREE.SphereGeometry(0.2, 8, 8);
 const debugBowMesh   = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color: 0xff0000 }));
 const debugSternMesh = new THREE.Mesh(dbGeo, new THREE.MeshBasicMaterial({ color: 0x0000ff }));
+debugBowMesh.visible = false;
+debugSternMesh.visible = false;
 scene.add(debugBowMesh);
 scene.add(debugSternMesh);
 
@@ -709,6 +771,172 @@ function toggleGravity() {
   modeLabel.textContent = gravityMode ? 'WALK' : 'FLY';
 }
 
+// ── Throw rope ───────────────────────────────────────────────────────────────
+const ROPE_SEGS  = 24;
+const ROPE_MAX   = 22;
+const ROPE_GRAV  = -14;
+
+let ropeActive      = false;
+let ropeReeling     = false;
+let ropeDeployed    = ROPE_MAX;
+let ropeLanded      = false;
+let ropeHookedKayak = false;
+
+const ropePos  = Array.from({ length: ROPE_SEGS + 1 }, () => new THREE.Vector3());
+const ropePrev = Array.from({ length: ROPE_SEGS + 1 }, () => new THREE.Vector3());
+
+const ropePosArr = new Float32Array((ROPE_SEGS + 1) * 3);
+const ropeGeo = new LineGeometry();
+ropeGeo.setPositions(ropePosArr);
+const ropeMat = new LineMaterial({ color: 0xffaa44, linewidth: 4, resolution: new THREE.Vector2(innerWidth, innerHeight) });
+const ropeLine = new Line2(ropeGeo, ropeMat);
+ropeLine.visible = false;
+scene.add(ropeLine);
+window.addEventListener('resize', () => ropeMat.resolution.set(innerWidth, innerHeight));
+
+const handBag = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.07, 0.09, 0.32, 10),
+  new THREE.MeshStandardMaterial({ color: 0xff6600, roughness: 0.7 })
+);
+handBag.visible = false;
+scene.add(handBag);
+
+function throwRope() {
+  const throwFwd = new THREE.Vector3();
+  camera.getWorldDirection(throwFwd);
+  const hbR = new THREE.Vector3().crossVectors(throwFwd, new THREE.Vector3(0,1,0)).normalize();
+  const hand = camera.position.clone()
+    .addScaledVector(throwFwd, 1.5)
+    .addScaledVector(hbR, 0.55)
+    .add(new THREE.Vector3(0, -0.9, 0));
+  for (let i = 0; i <= ROPE_SEGS; i++) { ropePos[i].copy(hand); ropePrev[i].copy(hand); }
+  // Seed bag velocity via Verlet: prev = pos - vel*dt (throw in pure camera forward direction)
+  const vel = throwFwd.clone().multiplyScalar(45).add(new THREE.Vector3(0, 8, 0));
+  ropePrev[ROPE_SEGS].sub(vel.multiplyScalar(0.016));
+  ropeDeployed    = 0.5;
+  ropeActive      = true;
+  ropeReeling     = false;
+  ropeLanded      = false;
+  ropeHookedKayak = false;
+  ropeLine.visible = true;
+  handBag.visible  = true;
+}
+
+function reelRope() {
+  if (ropeActive) ropeReeling = true;
+}
+
+function hideRope() {
+  ropeActive = ropeReeling = ropeHookedKayak = false;
+  ropeLine.visible = handBag.visible = false;
+}
+
+function updateRope(dt) {
+  if (!ropeActive) return;
+
+  const throwFwd = new THREE.Vector3();
+  camera.getWorldDirection(throwFwd);
+  const hbR = new THREE.Vector3().crossVectors(throwFwd, new THREE.Vector3(0,1,0)).normalize();
+  const hand = camera.position.clone()
+    .addScaledVector(throwFwd, 1.5)
+    .addScaledVector(hbR, 0.55)
+    .add(new THREE.Vector3(0, -0.9, 0));
+
+  if (ropeReeling) {
+    ropeDeployed = Math.max(0, ropeDeployed - 10 * dt);
+    if (ropeDeployed < 0.4) { hideRope(); return; }
+  } else if (!ropeLanded && ropeDeployed < ROPE_MAX) {
+    ropeDeployed = Math.min(ROPE_MAX, ropeDeployed + 18 * dt);
+  }
+
+  const segLen = ropeDeployed / ROPE_SEGS;
+
+  // Verlet integrate free points
+  for (let i = 1; i <= ROPE_SEGS; i++) {
+    const c = ropePos[i], p = ropePrev[i];
+    const vx = c.x - p.x, vy = c.y - p.y, vz = c.z - p.z;
+    p.copy(c);
+    c.x += vx;
+    c.y += vy + ROPE_GRAV * dt * dt;
+    c.z += vz;
+  }
+
+  // Constraint relaxation — pin anchor each iteration
+  for (let iter = 0; iter < 8; iter++) {
+    ropePos[0].copy(hand);
+    for (let i = 0; i < ROPE_SEGS; i++) {
+      const a = ropePos[i], b = ropePos[i + 1];
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1e-6;
+      const corr = (dist - segLen) / dist;
+      if (i === 0) {
+        b.x -= dx * corr; b.y -= dy * corr; b.z -= dz * corr;
+      } else {
+        const h = corr * 0.5;
+        a.x += dx*h; a.y += dy*h; a.z += dz*h;
+        b.x -= dx*h; b.y -= dy*h; b.z -= dz*h;
+      }
+    }
+  }
+
+  // Clamp every segment above the terrain
+  if (terrain) {
+    for (let i = 1; i <= ROPE_SEGS; i++) {
+      const p = ropePos[i];
+      raycaster.set(new THREE.Vector3(p.x, p.y + 10, p.z), downVec);
+      const th = raycaster.intersectObject(terrain, true);
+      if (th.length > 0 && p.y < th[0].point.y + 0.12) {
+        p.y = th[0].point.y + 0.12;
+        ropePrev[i].y = p.y;
+        if (i === ROPE_SEGS) { ropeLanded = true; ropePrev[i].copy(p); }
+      }
+    }
+  }
+
+  // Write to geometry
+  for (let i = 0; i <= ROPE_SEGS; i++) {
+    ropePosArr[i*3]   = ropePos[i].x;
+    ropePosArr[i*3+1] = ropePos[i].y;
+    ropePosArr[i*3+2] = ropePos[i].z;
+  }
+  // Hook detection — bag touches kayak
+  if (!ropeHookedKayak && kayakGltf) {
+    if (ropePos[ROPE_SEGS].distanceTo(kayakGltf.position) < 3) {
+      ropeHookedKayak = true;
+      ropeLanded = true;
+    }
+  }
+
+  // When hooked: pin bag to kayak; reeling pulls kayak toward hand
+  if (ropeHookedKayak && kayakGltf) {
+    ropePos[ROPE_SEGS].copy(kayakGltf.position);
+    ropePrev[ROPE_SEGS].copy(kayakGltf.position);
+
+    if (ropeReeling) {
+      const toHand = hand.clone().sub(kayakGltf.position);
+      const dist = toHand.length();
+      toHand.normalize();
+      kayakVelX += toHand.x * 8 * dt;
+      kayakVelZ += toHand.z * 8 * dt;
+
+      if (dist < 4) {
+        carryingKayak = true;
+        ropeHookedKayak = false;
+        rollTarget = 0; rollAngle = 0; kayakAngVel = 0;
+        hideRope();
+      }
+    }
+  }
+
+  ropeGeo.setPositions(ropePosArr);
+
+  // Hand bag — pushed well past the 1-unit near clip plane
+  const hbRight = new THREE.Vector3();
+  hbRight.crossVectors(throwFwd, new THREE.Vector3(0, 1, 0)).normalize();
+  handBag.position.copy(hand);
+  handBag.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), throwFwd);
+}
+
 const clock = new THREE.Clock();
 const smoothLookAt = new THREE.Vector3();
 
@@ -719,6 +947,7 @@ function animate() {
   // Animate rapids
   rapidsMat.uniforms.time.value += dt;
   updateSpray(dt);
+  updateRope(dt);
 
   // Intro fly-in
   if (introing) {
@@ -803,7 +1032,7 @@ function animate() {
         sphereBowRock = bowRock;
         sphereSternRock = sternRock;
 
-        if (!upsideDown) {
+        if (!upsideDown && !(ropeHookedKayak && ropeReeling)) {
           // Rock repels its sphere — net XZ push away from the rocky end
           const repel = (sternRock - bowRock) * 6;
           kayakVelX += kayakFwd.x * repel * dt;
@@ -829,8 +1058,25 @@ function animate() {
       }
     }
 
+    // When reeling a hooked kayak, pull it directly — skip all flow/drag physics
+    if (ropeHookedKayak && ropeReeling && terrain) {
+      // hand position mirrors updateRope's anchor calculation
+      const rf = new THREE.Vector3(); camera.getWorldDirection(rf);
+      const rr = new THREE.Vector3().crossVectors(rf, new THREE.Vector3(0,1,0)).normalize();
+      const reelingHand = camera.position.clone().addScaledVector(rf,1.5).addScaledVector(rr,0.55).add(new THREE.Vector3(0,-0.9,0));
+      const dx = reelingHand.x - kayakGltf.position.x;
+      const dz = reelingHand.z - kayakGltf.position.z;
+      const dist = Math.sqrt(dx*dx + dz*dz);
+      if (dist > 0.1) {
+        const step = Math.min(dist, 6 * dt);
+        kayakGltf.position.x += (dx / dist) * step;
+        kayakGltf.position.z += (dz / dist) * step;
+      }
+      kayakVelX = 0; kayakVelZ = 0; paddleSpeed = 0;
+    }
+
     // Flow physics — flat water drifts gently downstream; whitewater gravity-slams the kayak
-    if (terrain) {
+    if (terrain && !(ropeHookedKayak && ropeReeling)) {
       raycaster.set(new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 20, kayakGltf.position.z), downVec);
       const cHits = raycaster.intersectObject(terrain, true);
       if (cHits.length > 0) {
@@ -868,8 +1114,9 @@ function animate() {
         const targetRock = 1 - Math.max(0, Math.min(1, (brightness - 0.1) / 0.4));
         rockFactor += (targetRock - rockFactor) * Math.min(1, dt * 6);
         // Both modes: beach when both spheres on rock; one in water slides free
+        // Suppress drag when rope is actively pulling the kayak in
         const bothOnRock = Math.min(sphereBowRock, sphereSternRock);
-        const drag = bothOnRock * 10;
+        const drag = (ropeHookedKayak && ropeReeling) ? 0 : bothOnRock * 10;
         kayakVelX -= kayakVelX * drag * dt;
         kayakVelZ -= kayakVelZ * drag * dt;
         paddleSpeed -= paddleSpeed * drag * dt;
@@ -882,48 +1129,45 @@ function animate() {
       if (boofCooldown > 0) boofCooldown -= dt;
     }
 
-    // Camera follows behind and above
-    const targetCamPos = kayakGltf.position.clone()
-      .addScaledVector(kayakFwd, -6)
-      .add(new THREE.Vector3(0, 2.5, 0));
+    // Camera follows behind and above (only when not walking around on foot)
+    if (!flyMode) {
+      const targetCamPos = kayakGltf.position.clone()
+        .addScaledVector(kayakFwd, -6)
+        .add(new THREE.Vector3(0, 2.5, 0));
 
-    // Lift camera above terrain at its own XZ position
-    if (terrain) {
-      raycaster.set(new THREE.Vector3(targetCamPos.x, targetCamPos.y + 30, targetCamPos.z), downVec);
-      const ch = raycaster.intersectObject(terrain, true);
-      if (ch.length > 0) targetCamPos.y = Math.max(targetCamPos.y, ch[0].point.y + 3.0);
+      if (terrain) {
+        raycaster.set(new THREE.Vector3(targetCamPos.x, targetCamPos.y + 30, targetCamPos.z), downVec);
+        const ch = raycaster.intersectObject(terrain, true);
+        if (ch.length > 0) targetCamPos.y = Math.max(targetCamPos.y, ch[0].point.y + 3.0);
 
-      // Line-of-sight from kayaker to camera — if blocked by a wall, push camera up
-      const origin = kayakGltf.position.clone().add(new THREE.Vector3(0, 1, 0));
-      const toCam = targetCamPos.clone().sub(origin);
-      const dist = toCam.length();
-      raycaster.set(origin, toCam.clone().normalize(), 0.3, dist);
-      const wall = raycaster.intersectObject(terrain, true);
-      if (wall.length > 0) {
-        const pushUp = Math.min((dist - wall[0].distance) + 4.0, 10);
-        targetCamPos.y = Math.max(targetCamPos.y, kayakGltf.position.y + pushUp);
+        const origin = kayakGltf.position.clone().add(new THREE.Vector3(0, 1, 0));
+        const toCam = targetCamPos.clone().sub(origin);
+        const dist = toCam.length();
+        raycaster.set(origin, toCam.clone().normalize(), 0.3, dist);
+        const wall = raycaster.intersectObject(terrain, true);
+        if (wall.length > 0) {
+          const pushUp = Math.min((dist - wall[0].distance) + 4.0, 10);
+          targetCamPos.y = Math.max(targetCamPos.y, kayakGltf.position.y + pushUp);
+        }
       }
-    }
 
-    // Camera lag: tight in whitewater, relaxed in flat pools
-    const camLerp = 0.04 + currentSteepness * 0.12;
-    camera.position.lerp(targetCamPos, camLerp);
+      const camLerp = 0.04 + currentSteepness * 0.12;
+      camera.position.lerp(targetCamPos, camLerp);
 
-    // Push camera up if underground
-    if (terrain) {
-      raycaster.set(new THREE.Vector3(camera.position.x, camera.position.y + 30, camera.position.z), downVec);
-      const post = raycaster.intersectObject(terrain, true);
-      if (post.length > 0 && camera.position.y < post[0].point.y + 1.5) {
-        camera.position.y = post[0].point.y + 1.5;
+      if (terrain) {
+        raycaster.set(new THREE.Vector3(camera.position.x, camera.position.y + 30, camera.position.z), downVec);
+        const post = raycaster.intersectObject(terrain, true);
+        if (post.length > 0 && camera.position.y < post[0].point.y + 1.5) {
+          camera.position.y = post[0].point.y + 1.5;
+        }
       }
-    }
 
-    // Smooth the lookAt so camera rotation doesn't jitter
-    smoothLookAt.lerp(
-      new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z),
-      0.08 + currentSteepness * 0.12
-    );
-    camera.lookAt(smoothLookAt);
+      smoothLookAt.lerp(
+        new THREE.Vector3(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z),
+        0.08 + currentSteepness * 0.12
+      );
+      camera.lookAt(smoothLookAt);
+    }
   }
 
   if (flyMode && fly.isLocked) {
@@ -934,22 +1178,54 @@ function animate() {
 
     if (gravityMode) {
       flatFwd.set(fwd.x, 0, fwd.z).normalize();
-      if (keys.has('KeyW')) camera.position.addScaledVector(flatFwd, s);
-      if (keys.has('KeyS')) camera.position.addScaledVector(flatFwd, -s);
-      if (keys.has('KeyD')) camera.position.addScaledVector(right, s);
-      if (keys.has('KeyA')) camera.position.addScaledVector(right, -s);
+      const sprint = keys.has('KeyE') ? 2.2 : 1;
+      const ws = 6 * boost * sprint * dt;
+      if (keys.has('KeyW')) camera.position.addScaledVector(flatFwd, ws);
+      if (keys.has('KeyS')) camera.position.addScaledVector(flatFwd, -ws);
+      if (keys.has('KeyD')) camera.position.addScaledVector(right, ws);
+      if (keys.has('KeyA')) camera.position.addScaledVector(right, -ws);
 
       verticalVelocity += GRAVITY * dt;
       camera.position.y += verticalVelocity * dt;
 
       if (terrain) {
-        raycaster.set(camera.position, downVec);
+        // Cast from well above to avoid missing terrain when camera clips below mesh
+        const above = new THREE.Vector3(camera.position.x, camera.position.y + 50, camera.position.z);
+        raycaster.set(above, downVec);
         const hits = raycaster.intersectObject(terrain, true);
         if (hits.length > 0) {
-          const groundY = hits[0].point.y + PLAYER_HEIGHT;
-          if (camera.position.y < groundY) {
-            camera.position.y = groundY;
+          const hit = hits[0];
+          const col = hit.object.geometry.attributes.color;
+          const f = hit.face;
+          const brightness = (col.getX(f.a)+col.getY(f.a)+col.getZ(f.a)+col.getX(f.b)+col.getY(f.b)+col.getZ(f.b)+col.getX(f.c)+col.getY(f.c)+col.getZ(f.c)) / 3;
+          const waterFRaw = Math.max(0, Math.min(1, (brightness - 0.1) / 0.4));
+          walkWaterF += (waterFRaw - walkWaterF) * Math.min(1, dt * 3);
+
+          // Current — same two-tier system as the kayak
+          const wn = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+          const slope = 1.0 - Math.abs(wn.y);
+          const rapid = Math.min(1, Math.max(0, (slope - 0.04) / 0.46));
+          if (rapid < 0.02) {
+            walkVelX += (FLOW_X * 1.2 * walkWaterF - walkVelX) * Math.min(1, dt * 2);
+            walkVelZ += (FLOW_Z * 1.2 * walkWaterF - walkVelZ) * Math.min(1, dt * 2);
+          } else {
+            const il = 1.0 / Math.max(Math.sqrt(wn.x*wn.x + wn.z*wn.z), 1e-6);
+            walkVelX += wn.x * il * rapid * 40 * walkWaterF * dt;
+            walkVelZ += wn.z * il * rapid * 40 * walkWaterF * dt;
+            walkVelX *= 1.0 - 2.0 * dt;
+            walkVelZ *= 1.0 - 2.0 * dt;
+          }
+          camera.position.x += walkVelX * dt;
+          camera.position.z += walkVelZ * dt;
+
+          // Sink into water — smoothed so rock↔water transition is gradual
+          const groundY = hit.point.y + PLAYER_HEIGHT * (1 - walkWaterF * 0.5);
+          camera.position.y = Math.max(camera.position.y, groundY);
+          if (camera.position.y <= groundY + 0.01) {
             verticalVelocity = 0;
+            isGrounded = true;
+          } else {
+            isGrounded = false;
           }
         }
       }
@@ -961,6 +1237,19 @@ function animate() {
       if (keys.has('KeyE')) camera.position.y += s;
       if (keys.has('KeyQ')) camera.position.y -= s;
     }
+  }
+
+  // Carry kayak on shoulder in walk mode
+  if (carryingKayak && kayakGltf && flyMode) {
+    camera.getWorldDirection(fwd);
+    right.crossVectors(fwd, worldUp).normalize();
+    kayakGltf.position.copy(camera.position)
+      .addScaledVector(right, 1.4)
+      .addScaledVector(fwd, 0.8)
+      .add(new THREE.Vector3(0, 0.3, 0));
+    const camYaw = Math.atan2(fwd.x, fwd.z);
+    kayakGltf.rotation.set(0.1, camYaw + Math.PI / 2, 0, 'YXZ');
+    kayakVelX = 0; kayakVelZ = 0; paddleSpeed = 0;
   }
 
   renderer.render(scene, camera);
