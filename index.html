@@ -76,6 +76,9 @@
       top: 50%; left: 50%;
       transform: translate(-50%, -50%);
     }
+    #action-buttons, #btn-reset {
+      transition: opacity 0.4s ease;
+    }
     #action-buttons {
       position: absolute;
       bottom: calc(36px + env(safe-area-inset-bottom));
@@ -108,8 +111,17 @@
       top: calc(16px + env(safe-area-inset-top));
       left: calc(16px + env(safe-area-inset-left));
     }
+    #rope-target {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: white; font-size: 36px; font-family: monospace;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.35s ease;
+      text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
+      line-height: 1; user-select: none;
+    }
   </style>
-  <script type="module" crossorigin src="/JIMMYBOOF/assets/index-CbxtpRvP.js"></script>
+  <script type="module" crossorigin src="/JIMMYBOOF/assets/index-D2jaYaBz.js"></script>
 </head>
 <body>
   <div id="loading">Loading terrain...</div>
@@ -136,5 +148,6 @@
       </div>
     </div>
   </div>
+  <div id="rope-target">+</div>
 </body>
 </html>
