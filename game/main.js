@@ -1346,10 +1346,6 @@ function animate() {
 
   // Mobile orbit camera
   if (isTouchDevice && mobileOrbitActive && !playMode && !flyMode) {
-    const joySpeed = orbitRadius * 0.8 * dt;
-    const jCr = new THREE.Vector3(Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
-    orbitFocus.addScaledVector(jCr, joystickX * joySpeed);
-    orbitFocus.y -= joystickY * joySpeed;
     camera.position.set(
       orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
       orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
@@ -1383,11 +1379,13 @@ const _btnQ        = document.getElementById('btn-q');
 const _btnE        = document.getElementById('btn-e');
 const _actionBtns  = document.getElementById('action-buttons');
 const _btnResetEl  = document.getElementById('btn-reset');
+const _joystickZone = document.getElementById('joystick-zone');
 function setOrbitUI(entering) {
   const op = entering ? '0' : '1';
   const pe = entering ? 'none' : 'all';
-  if (_actionBtns) { _actionBtns.style.opacity = op; _actionBtns.style.pointerEvents = pe; }
-  if (_btnResetEl) { _btnResetEl.style.opacity = op; _btnResetEl.style.pointerEvents = pe; }
+  if (_actionBtns)  { _actionBtns.style.opacity  = op; _actionBtns.style.pointerEvents  = pe; }
+  if (_btnResetEl)  { _btnResetEl.style.opacity   = op; _btnResetEl.style.pointerEvents   = pe; }
+  if (_joystickZone){ _joystickZone.style.opacity  = op; _joystickZone.style.pointerEvents = pe; }
 }
 function updatePhoneButtons() {
   let qIcon, eIcon;
@@ -1587,11 +1585,10 @@ renderer.domElement.addEventListener('touchmove', e => {
     // Two-finger drag → pan focus in ground plane
     const pdx = panX - orbitPanLast.x;
     const pdy = panY - orbitPanLast.y;
-    const ps  = orbitRadius * 0.002;
-    const cr  = new THREE.Vector3( Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
-    const cf  = new THREE.Vector3(-Math.sin(orbitTheta), 0, -Math.cos(orbitTheta));
+    const ps = orbitRadius * 0.002;
+    const cr = new THREE.Vector3(Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
     orbitFocus.addScaledVector(cr, -pdx * ps);
-    orbitFocus.addScaledVector(cf, -pdy * ps);
+    orbitFocus.y += pdy * ps;
 
     orbitPinchLast = pinch;
     orbitPanLast   = { x: panX, y: panY };
