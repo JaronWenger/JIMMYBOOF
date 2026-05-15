@@ -718,6 +718,7 @@ window.addEventListener('mousemove', e => {
 // Scroll zoom (orbit only)
 let speed = 50;
 window.addEventListener('wheel', e => {
+  e.preventDefault();
   if (!flyMode) {
     const ndcX = (mouseX / innerWidth) * 2 - 1;
     const ndcY = -(mouseY / innerHeight) * 2 + 1;
@@ -727,7 +728,7 @@ window.addEventListener('wheel', e => {
       .normalize();
     camera.position.addScaledVector(zoomDir, e.deltaY * 0.15);
   }
-}, { passive: true });
+}, { passive: false });
 
 // Resize
 window.addEventListener('resize', () => {
@@ -1579,8 +1580,23 @@ renderer.domElement.addEventListener('touchmove', e => {
     const panX   = (t0.clientX + t1.clientX) / 2;
     const panY   = (t0.clientY + t1.clientY) / 2;
 
-    // Pinch → zoom
-    if (orbitPinchLast > 0) orbitRadius = Math.max(5, Math.min(600, orbitRadius * orbitPinchLast / pinch));
+    // Pinch → zoom toward pinch midpoint in world space
+    if (orbitPinchLast > 0) {
+      const newRadius = Math.max(5, Math.min(600, orbitRadius * orbitPinchLast / pinch));
+      // Ray from camera through pinch midpoint; intersect horizontal plane at orbitFocus.y
+      const ndcX = (panX / innerWidth) * 2 - 1;
+      const ndcY = -(panY / innerHeight) * 2 + 1;
+      const pinchRay = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position).normalize();
+      if (Math.abs(pinchRay.y) > 0.001) {
+        const tHit = (orbitFocus.y - camera.position.y) / pinchRay.y;
+        if (tHit > 0) {
+          const worldPinch = camera.position.clone().addScaledVector(pinchRay, tHit);
+          // Shift focus so worldPinch stays under the pinch midpoint after radius change
+          orbitFocus.lerpVectors(worldPinch, orbitFocus, newRadius / orbitRadius);
+        }
+      }
+      orbitRadius = newRadius;
+    }
 
     // Two-finger drag → pan focus in ground plane
     const pdx = panX - orbitPanLast.x;
