@@ -2,6 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Great Falls">
+  <meta name="theme-color" content="#00000d">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-180.png">
   <title>Great Falls</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -26,26 +33,108 @@
       margin-top: 8px;
       padding: 12px 48px;
       font-size: 15px; letter-spacing: 3px;
-      background: none; border: 1px solid rgba(255,255,255,0.6);
+      background: none; border: 3px solid rgba(255,255,255,0.9);
       color: white; cursor: pointer;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.35);
+      filter: drop-shadow(0 2px 12px rgba(0,0,0,0.9));
       transition: background 0.2s, border-color 0.2s;
     }
     #go:hover { background: rgba(255,255,255,0.12); border-color: white; }
     #mode {
       position: fixed; top: 16px; left: 16px;
       color: white; font-family: sans-serif; font-size: 12px;
-      opacity: 0.5; letter-spacing: 2px;
+      opacity: 0; letter-spacing: 2px;
+      transition: opacity 0.8s ease;
+    }
+
+    /* ── Phone UI ─────────────────────────────────────── */
+    #phone-ui {
+      display: none;
+      position: fixed; inset: 0;
+      pointer-events: none;
+    }
+    #joystick-zone {
+      position: absolute;
+      bottom: calc(36px + env(safe-area-inset-bottom));
+      left: calc(36px + env(safe-area-inset-left));
+      width: 140px; height: 140px;
+      pointer-events: all;
+    }
+    #joystick-base {
+      width: 100%; height: 100%;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.10);
+      border: 2px solid rgba(255,255,255,0.22);
+      position: relative;
+    }
+    #joystick-thumb {
+      width: 54px; height: 54px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.32);
+      border: 1.5px solid rgba(255,255,255,0.5);
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+    }
+    #action-buttons {
+      position: absolute;
+      bottom: calc(36px + env(safe-area-inset-bottom));
+      right: calc(28px + env(safe-area-inset-right));
+      display: flex; flex-direction: column;
+      align-items: center; gap: 12px;
+      pointer-events: all;
+    }
+    .btn-row { display: flex; gap: 12px; }
+    .action-btn {
+      width: 68px; height: 68px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.12);
+      border: 2px solid rgba(255,255,255,0.30);
+      color: white; font-size: 26px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none; pointer-events: all;
+    }
+    .action-btn:active { background: rgba(255,255,255,0.28); }
+    .action-btn.toggled { background: rgba(255,255,255,0.35); border-color: rgba(255,255,255,0.8); }
+    #btn-reset {
+      position: absolute;
+      top: calc(16px + env(safe-area-inset-top));
+      right: calc(16px + env(safe-area-inset-right));
+      width: 48px; height: 48px; font-size: 20px;
+    }
+    #mode {
+      top: calc(16px + env(safe-area-inset-top));
+      left: calc(16px + env(safe-area-inset-left));
     }
   </style>
-  <script type="module" crossorigin src="/JIMMYBOOF/assets/index-DzkKtsVW.js"></script>
+  <script type="module" crossorigin src="/JIMMYBOOF/assets/index-CbxtpRvP.js"></script>
 </head>
 <body>
   <div id="loading">Loading terrain...</div>
-<div id="mode">FLY</div>
+<div id="mode">KAYAK</div>
   <div id="overlay">
     <h1>GREAT FALLS</h1>
     <button id="go">GO</button>
-    <p>WASD paddle &nbsp;·&nbsp; F free fly &nbsp;·&nbsp; Esc orbit/kayak</p>
+    <p>WASD paddle &nbsp;·&nbsp; Q roll &nbsp;·&nbsp; E walk</p>
+  </div>
+  <div id="phone-ui">
+    <button class="action-btn" id="btn-reset">↺</button>
+    <div id="joystick-zone">
+      <div id="joystick-base">
+        <div id="joystick-thumb"></div>
+      </div>
+    </div>
+    <div id="action-buttons">
+      <div class="btn-row">
+        <button class="action-btn" id="btn-space">▲</button>
+      </div>
+      <div class="btn-row">
+        <button class="action-btn" id="btn-q">↺</button>
+        <button class="action-btn" id="btn-e">⚡</button>
+      </div>
+    </div>
   </div>
 </body>
 </html>
