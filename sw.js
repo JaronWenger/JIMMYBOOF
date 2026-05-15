@@ -13,6 +13,7 @@ self.addEventListener('activate', e =>
 // Stale-while-revalidate: serve cache instantly, refresh in background
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  if (!e.request.url.startsWith('http')) return;
   e.respondWith(
     caches.open(CACHE).then(cache =>
       cache.match(e.request).then(cached => {
