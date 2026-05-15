@@ -28,11 +28,11 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMappingExposure = 1.5;
 document.body.appendChild(renderer.domElement);
 
 // Lighting
-scene.add(new THREE.AmbientLight(0x8899bb, 0.25));
+scene.add(new THREE.AmbientLight(0x8899bb, 0.4));
 const sun = new THREE.DirectionalLight(0xfff0cc, 3.0);
 sun.position.set(600, 300, 100);
 sun.castShadow = true;
@@ -164,7 +164,7 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
       float spec = pow(max(dot(N, halfVec), 0.0), 128.0);
 
       // Rock color with lighting
-      vec3 rockLit = rockAlbedo * (0.18 + 0.82 * diff) * sunColor
+      vec3 rockLit = rockAlbedo * (0.28 + 0.72 * diff) * sunColor
                    + sunColor * spec * 0.05 * (1.0 - rockRough);
 
       // Slope drives base color: flat = teal, steep = white
@@ -173,7 +173,7 @@ const rapidsMat = new THREE.ShaderMaterial({ side: THREE.DoubleSide,
       waterColor = mix(waterColor, vec3(1.0, 1.0, 1.0), foam * 0.25 * slopeFoam);
       float waterRough = texture2D(waterRoughnessMap, uv1).r;
       float waterSpec = mix(spec * (1.0 - waterRough) * 1.2, spec * 0.9, slopeFoam);
-      vec3 waterLit = waterColor * (0.4 + 0.6 * diff) + vec3(waterSpec);
+      vec3 waterLit = waterColor * (0.5 + 0.5 * diff) + vec3(waterSpec);
 
       // Wet rock — exponential falloff: full effect at boundary, drops fast further out
       float wetF = smoothstep(0.0, 0.88, vWetRock);
@@ -607,7 +607,7 @@ window.addEventListener('keydown', e => {
       rollTarget = 0; rollAngle = 0; kayakAngVel = 0;
       hideRope();
     } else if (!carryingKayak && !ropeActive) {
-      throwRope();
+      ropeHolding = true; showRopeTarget();
     } else if (!carryingKayak && ropeActive) {
       reelRope();
     } else if (carryingKayak) {
@@ -652,7 +652,12 @@ window.addEventListener('keydown', e => {
     console.log(`position: (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})  direction: (${d.x.toFixed(3)}, ${d.y.toFixed(3)}, ${d.z.toFixed(3)})`);
   }
 });
-window.addEventListener('keyup', e => keys.delete(e.code));
+window.addEventListener('keyup', e => {
+  keys.delete(e.code);
+  if (e.code === 'KeyQ' && ropeHolding) {
+    ropeHolding = false; hideRopeTarget(); throwRope();
+  }
+});
 
 // Orbit-mode mouse
 const euler  = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -838,6 +843,12 @@ let ropeReeling     = false;
 let ropeDeployed    = ROPE_MAX;
 let ropeLanded      = false;
 let ropeHookedKayak = false;
+let ropeAttachSign  = 1; // +1 = bow, -1 = stern
+let ropeHolding     = false;
+
+const _ropeTarget = document.getElementById('rope-target');
+function showRopeTarget() { _ropeTarget.style.opacity = '1'; }
+function hideRopeTarget() { _ropeTarget.style.opacity = '0'; }
 
 const ropePos  = Array.from({ length: ROPE_SEGS + 1 }, () => new THREE.Vector3());
 const ropePrev = Array.from({ length: ROPE_SEGS + 1 }, () => new THREE.Vector3());
@@ -884,7 +895,8 @@ function reelRope() {
 }
 
 function hideRope() {
-  ropeActive = ropeReeling = ropeHookedKayak = false;
+  ropeActive = ropeReeling = ropeHookedKayak = ropeHolding = false;
+  hideRopeTarget();
   ropeLine.visible = handBag.visible = false;
 }
 
@@ -956,21 +968,33 @@ function updateRope(dt) {
     ropePosArr[i*3+1] = ropePos[i].y;
     ropePosArr[i*3+2] = ropePos[i].z;
   }
-  // Hook detection — bag touches kayak
+  // Hook detection — bag touches bow or stern sphere
+  // Hull offset: -cos(roll)*0.5 puts attachment on the hull surface regardless of roll angle
+  // (below center when upright, above center when inverted)
   if (!ropeHookedKayak && kayakGltf) {
-    if (ropePos[ROPE_SEGS].distanceTo(kayakGltf.position) < 3) {
+    const hullY = -Math.cos(rollAngle) * 0.5;
+    const bowPos   = kayakGltf.position.clone().addScaledVector(kayakFwd,  0.8); bowPos.y   += hullY;
+    const sternPos = kayakGltf.position.clone().addScaledVector(kayakFwd, -0.8); sternPos.y += hullY;
+    const dBow   = ropePos[ROPE_SEGS].distanceTo(bowPos);
+    const dStern = ropePos[ROPE_SEGS].distanceTo(sternPos);
+    const dMin = Math.min(dBow, dStern);
+    if (dMin < 3) {
       ropeHookedKayak = true;
       ropeLanded = true;
+      ropeAttachSign = dBow <= dStern ? 1 : -1;
     }
   }
 
-  // When hooked: pin bag to kayak; reeling pulls kayak toward hand
+  // When hooked: pin bag to whichever end caught; reeling pulls kayak toward hand
   if (ropeHookedKayak && kayakGltf) {
-    ropePos[ROPE_SEGS].copy(kayakGltf.position);
-    ropePrev[ROPE_SEGS].copy(kayakGltf.position);
+    const hullY = -Math.cos(rollAngle) * 0.5;
+    const attachPt = kayakGltf.position.clone().addScaledVector(kayakFwd, ropeAttachSign * 0.8);
+    attachPt.y += hullY;
+    ropePos[ROPE_SEGS].copy(attachPt);
+    ropePrev[ROPE_SEGS].copy(attachPt);
 
     if (ropeReeling) {
-      const toHand = hand.clone().sub(kayakGltf.position);
+      const toHand = hand.clone().sub(attachPt);
       const dist = toHand.length();
       toHand.normalize();
       kayakVelX += toHand.x * 8 * dt;
@@ -1322,6 +1346,10 @@ function animate() {
 
   // Mobile orbit camera
   if (isTouchDevice && mobileOrbitActive && !playMode && !flyMode) {
+    const joySpeed = orbitRadius * 0.8 * dt;
+    const jCr = new THREE.Vector3(Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
+    orbitFocus.addScaledVector(jCr, joystickX * joySpeed);
+    orbitFocus.y -= joystickY * joySpeed;
     camera.position.set(
       orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
       orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
@@ -1351,8 +1379,16 @@ document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preven
 document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
 
 // ── Phone button icon updates ────────────────────────────────────────────────
-const _btnQ = document.getElementById('btn-q');
-const _btnE = document.getElementById('btn-e');
+const _btnQ        = document.getElementById('btn-q');
+const _btnE        = document.getElementById('btn-e');
+const _actionBtns  = document.getElementById('action-buttons');
+const _btnResetEl  = document.getElementById('btn-reset');
+function setOrbitUI(entering) {
+  const op = entering ? '0' : '1';
+  const pe = entering ? 'none' : 'all';
+  if (_actionBtns) { _actionBtns.style.opacity = op; _actionBtns.style.pointerEvents = pe; }
+  if (_btnResetEl) { _btnResetEl.style.opacity = op; _btnResetEl.style.pointerEvents = pe; }
+}
 function updatePhoneButtons() {
   let qIcon, eIcon;
   if (flyMode && gravityMode) {
@@ -1443,6 +1479,7 @@ phoneBtn('btn-reset', () => {
     playMode = true;
     modeLabel.textContent = 'KAYAK';
     if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+    setOrbitUI(false);
   }
   if (flyMode && gravityMode) {
     // Exit walk mode and get back in kayak at the top
@@ -1459,23 +1496,37 @@ phoneBtn('btn-space', () => {
   if (flyMode && gravityMode && isGrounded) { verticalVelocity = 10; isGrounded = false; return; }
   if (playMode && !flyMode) triggerBoof();
 });
-phoneBtn('btn-q', () => {
-  if (playMode && !flyMode) { triggerRoll(); return; }
-  if (flyMode && gravityMode && kayakGltf) {
-    if (!carryingKayak && camera.position.distanceTo(kayakGltf.position) < 5) {
-      carryingKayak = true; rollTarget = 0; rollAngle = 0; kayakAngVel = 0; hideRope();
-    } else if (carryingKayak) {
-      carryingKayak = false;
-      camera.getWorldDirection(fwd);
-      kayakGltf.position.copy(camera.position).addScaledVector(fwd, 2.5).add(new THREE.Vector3(0, -0.3, 0));
-      const throwYaw = Math.atan2(fwd.x, fwd.z);
-      kayakerYaw = throwYaw;
-      kayakGltf.rotation.set(0, throwYaw + Math.PI / 2, 0, 'YXZ');
-      kayakVelX = fwd.x * 7; kayakVelZ = fwd.z * 7; boofVelY = 4; isBoofing = true;
-    } else if (!ropeActive) { throwRope(); }
-    else { reelRope(); }
+{
+  const el = document.getElementById('btn-q');
+  if (el) {
+    el.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (playMode && !flyMode) { triggerRoll(); return; }
+      if (flyMode && gravityMode && kayakGltf) {
+        if (!carryingKayak && camera.position.distanceTo(kayakGltf.position) < 5) {
+          carryingKayak = true; rollTarget = 0; rollAngle = 0; kayakAngVel = 0; hideRope();
+        } else if (carryingKayak) {
+          // carry → throw kayak on touchstart (instant, no aim needed)
+          carryingKayak = false;
+          camera.getWorldDirection(fwd);
+          kayakGltf.position.copy(camera.position).addScaledVector(fwd, 2.5).add(new THREE.Vector3(0, -0.3, 0));
+          const throwYaw = Math.atan2(fwd.x, fwd.z);
+          kayakerYaw = throwYaw;
+          kayakGltf.rotation.set(0, throwYaw + Math.PI / 2, 0, 'YXZ');
+          kayakVelX = fwd.x * 7; kayakVelZ = fwd.z * 7; boofVelY = 4; isBoofing = true;
+        } else if (ropeActive) {
+          reelRope();
+        } else {
+          ropeHolding = true; showRopeTarget();
+        }
+      }
+    }, { passive: false });
+    el.addEventListener('touchend', e => {
+      e.preventDefault();
+      if (ropeHolding) { ropeHolding = false; hideRopeTarget(); throwRope(); }
+    }, { passive: false });
   }
-});
+}
 phoneBtn('btn-e', () => {
   if (playMode && kayakGltf && !flyMode) {
     // Enter walk mode — bypass pointer lock on touch devices
@@ -1566,11 +1617,13 @@ if (isTouchDevice) {
       mobileOrbitActive = true;
       modeLabel.textContent = 'ORBIT';
       initOrbit();
+      setOrbitUI(true);
     } else {
       playMode = true;
       mobileOrbitActive = false;
       if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
       modeLabel.textContent = 'KAYAK';
+      setOrbitUI(false);
     }
   }, { passive: false });
 }
