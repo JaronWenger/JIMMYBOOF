@@ -20,6 +20,7 @@ scene.fog = new THREE.FogExp2(0xb9d8f0, 0.0006);
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 1, 5000);
 camera.position.set(68.6, 29.1, -279.6);
 camera.lookAt(68.6 + -0.061, 29.1 + -0.056, -279.6 + 0.997);
+// Bootstrap desktop orbit from initial camera pose (initOrbit() defined later, called after scene setup)
 
 // Renderer
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -569,6 +570,7 @@ fly.addEventListener('unlock', () => {
   walkVelX = 0; walkVelZ = 0;
   if (carryingKayak) { carryingKayak = false; snapKayakerToTerrain(); }
   hideRope(); walkWaterF = 0;
+  if (!isTouchDevice) initOrbit();
   if (kayakGltf) {
     smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
     playMode = true;
@@ -672,14 +674,16 @@ let mouseX = innerWidth / 2, mouseY = innerHeight / 2;
 
 window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
 
+let desktopOrbitPendingFocus = false;
 renderer.domElement.addEventListener('mousedown', e => {
   if (flyMode) return;
   mouseBtn = e.button;
   lastX = e.clientX; lastY = e.clientY;
   if (e.button === 1) e.preventDefault();
+  if (!playMode && (e.button === 0 || e.button === 1)) desktopOrbitPendingFocus = true;
 });
 renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
-window.addEventListener('mouseup', () => { mouseBtn = -1; });
+window.addEventListener('mouseup', () => { mouseBtn = -1; desktopOrbitPendingFocus = false; });
 
 window.addEventListener('mousemove', e => {
   if (flyMode || mouseBtn === -1) return;
@@ -687,48 +691,44 @@ window.addEventListener('mousemove', e => {
   const dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
 
-  if (mouseBtn === 1) {
-    camera.getWorldDirection(fwd);
-    right.crossVectors(fwd, worldUp).normalize();
-    up.crossVectors(right, fwd).normalize();
-
-    if (e.metaKey) {
-      camera.position.addScaledVector(fwd, dy * 0.4);
-    } else if (e.shiftKey) {
-      camera.position.addScaledVector(right, -dx * 0.2);
-      camera.position.addScaledVector(up,     dy * 0.2);
-    } else {
-      euler.setFromQuaternion(camera.quaternion);
-      euler.y -= dx * 0.004;
-      euler.x -= dy * 0.004;
-      euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
-      camera.quaternion.setFromEuler(euler);
+  if (!playMode && (mouseBtn === 0 || mouseBtn === 1)) {
+    if (desktopOrbitPendingFocus) {
+      setOrbitFocusFromScreen(e.clientX - dx, e.clientY - dy);
+      desktopOrbitPendingFocus = false;
     }
+    orbitTheta -= dx * 0.005;
+    orbitPhi   -= dy * 0.005;
+    orbitPhi    = Math.max(0.05, Math.min(Math.PI * 0.85, orbitPhi));
   }
 
-  if (mouseBtn === 2) {
-    camera.getWorldDirection(fwd);
-    right.crossVectors(fwd, worldUp).normalize();
-    up.crossVectors(right, fwd).normalize();
-    camera.position.addScaledVector(right, -dx * 0.2);
-    camera.position.addScaledVector(up,     dy * 0.2);
+  if (!playMode && mouseBtn === 2) {
+    const ps = orbitRadius * 0.003;
+    const cr = new THREE.Vector3(Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
+    const target = orbitEyeMode ? orbitEyePos : orbitFocus;
+    target.addScaledVector(cr, -dx * ps);
+    target.y += dy * ps;
   }
 });
 
-// Scroll zoom (orbit only)
-let speed = 50;
+// Scroll zoom (orbit only) — zoom toward cursor, same as mobile pinch
 window.addEventListener('wheel', e => {
   e.preventDefault();
-  if (!flyMode) {
-    const ndcX = (mouseX / innerWidth) * 2 - 1;
-    const ndcY = -(mouseY / innerHeight) * 2 + 1;
-    const zoomDir = new THREE.Vector3(ndcX, ndcY, 0.5)
-      .unproject(camera)
-      .sub(camera.position)
-      .normalize();
-    camera.position.addScaledVector(zoomDir, e.deltaY * 0.15);
+  if (flyMode) return;
+  const newRadius = Math.max(5, Math.min(600, orbitRadius + e.deltaY * 0.15));
+  const ndcX = (mouseX / innerWidth) * 2 - 1;
+  const ndcY = -(mouseY / innerHeight) * 2 + 1;
+  const zoomRay = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position).normalize();
+  if (Math.abs(zoomRay.y) > 0.001) {
+    const tHit = (orbitFocus.y - camera.position.y) / zoomRay.y;
+    if (tHit > 0) {
+      const worldPt = camera.position.clone().addScaledVector(zoomRay, tHit);
+      orbitFocus.lerpVectors(worldPt, orbitFocus, newRadius / orbitRadius);
+    }
   }
+  orbitRadius = newRadius;
 }, { passive: false });
+
+const speed = 50; // fly/walk movement speed (units/sec before boost)
 
 // Resize
 window.addEventListener('resize', () => {
@@ -742,7 +742,10 @@ let mobileFlyMode = false;
 
 // Mobile orbit state (Google Earth–style)
 let mobileOrbitActive = false;
-let orbitFocus   = new THREE.Vector3(68.6, 0, -279.6);
+let orbitEyeMode = false;
+let orbitFocus     = new THREE.Vector3(68.6, 0, -279.6);
+const orbitFocusLook = new THREE.Vector3(68.6, 0, -279.6);
+const orbitEyePos = new THREE.Vector3();
 let orbitTheta   = 0;          // azimuth
 let orbitPhi     = Math.PI / 3; // elevation
 let orbitRadius  = 80;
@@ -826,7 +829,9 @@ function initOrbit() {
   orbitRadius = Math.max(10, offset.length());
   orbitPhi    = Math.acos(Math.max(-1, Math.min(1, offset.y / orbitRadius)));
   orbitTheta  = Math.atan2(offset.x, offset.z);
+  orbitFocusLook.copy(orbitFocus);
 }
+if (!isTouchDevice) initOrbit(); // bootstrap desktop orbit from initial camera pose
 
 function toggleGravity() {
   gravityMode = !gravityMode;
@@ -1025,6 +1030,10 @@ const smoothLookAt = new THREE.Vector3();
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
+
+  // Zoom in for landscape phone kayak mode only
+  const targetFov = (isTouchDevice && playMode && !flyMode && innerWidth > innerHeight) ? 55 : 75;
+  if (camera.fov !== targetFov) { camera.fov = targetFov; camera.updateProjectionMatrix(); }
 
   // Animate rapids
   rapidsMat.uniforms.time.value += dt;
@@ -1345,14 +1354,44 @@ function animate() {
     kayakVelX = 0; kayakVelZ = 0; paddleSpeed = 0;
   }
 
+  // Desktop orbit camera (left/middle drag = orbit, right drag = pan, scroll = zoom)
+  if (!isTouchDevice && !playMode && !flyMode) {
+    if (orbitEyeMode) {
+      camera.position.copy(orbitEyePos);
+      orbitFocus.set(
+        orbitEyePos.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+        orbitEyePos.y + orbitRadius * Math.cos(orbitPhi),
+        orbitEyePos.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+      );
+    } else {
+      camera.position.set(
+        orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+        orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
+        orbitFocus.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+      );
+    }
+    orbitFocusLook.lerp(orbitFocus, Math.min(1, dt * 10));
+    camera.lookAt(orbitFocusLook);
+  }
+
   // Mobile orbit camera
   if (isTouchDevice && mobileOrbitActive && !playMode && !flyMode) {
-    camera.position.set(
-      orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
-      orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
-      orbitFocus.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
-    );
-    camera.lookAt(orbitFocus);
+    if (orbitEyeMode) {
+      camera.position.copy(orbitEyePos);
+      orbitFocus.set(
+        orbitEyePos.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+        orbitEyePos.y + orbitRadius * Math.cos(orbitPhi),
+        orbitEyePos.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+      );
+    } else {
+      camera.position.set(
+        orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+        orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
+        orbitFocus.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+      );
+    }
+    orbitFocusLook.lerp(orbitFocus, Math.min(1, dt * 10));
+    camera.lookAt(orbitFocusLook);
   }
 
   // Swap Kayaker ↔ Kayak-only model based on whether player is on foot
@@ -1380,13 +1419,33 @@ const _btnQ        = document.getElementById('btn-q');
 const _btnE        = document.getElementById('btn-e');
 const _actionBtns  = document.getElementById('action-buttons');
 const _btnResetEl  = document.getElementById('btn-reset');
-const _joystickZone = document.getElementById('joystick-zone');
+const _joystickZone  = document.getElementById('joystick-zone');
+const _btnOrbitMode  = document.getElementById('btn-orbit-mode');
 function setOrbitUI(entering) {
-  const op = entering ? '0' : '1';
-  const pe = entering ? 'none' : 'all';
-  if (_actionBtns)  { _actionBtns.style.opacity  = op; _actionBtns.style.pointerEvents  = pe; }
-  if (_btnResetEl)  { _btnResetEl.style.opacity   = op; _btnResetEl.style.pointerEvents   = pe; }
-  if (_joystickZone){ _joystickZone.style.opacity  = op; _joystickZone.style.pointerEvents = pe; }
+  const hide = entering ? '0' : '1', show = entering ? '1' : '0';
+  const offPE = 'none', onPE = 'all';
+  if (_actionBtns)   { _actionBtns.style.opacity   = hide; _actionBtns.style.pointerEvents   = entering ? offPE : onPE; }
+  if (_btnResetEl)   { _btnResetEl.style.opacity    = hide; _btnResetEl.style.pointerEvents    = entering ? offPE : onPE; }
+  if (_joystickZone) { _joystickZone.style.opacity  = hide; _joystickZone.style.pointerEvents  = entering ? offPE : onPE; }
+  if (_btnOrbitMode) { _btnOrbitMode.style.opacity  = show; _btnOrbitMode.style.pointerEvents  = entering ? onPE  : offPE; }
+  if (!entering) { orbitEyeMode = false; if (_btnOrbitMode) _btnOrbitMode.textContent = '🌐'; }
+}
+function toggleOrbitEyeMode() {
+  orbitEyeMode = !orbitEyeMode;
+  // Flip theta/phi so view direction is continuous across the mode switch
+  orbitTheta += Math.PI;
+  orbitPhi    = Math.PI - orbitPhi;
+  orbitPhi    = Math.max(0.05, Math.min(Math.PI * 0.85, orbitPhi));
+  if (orbitEyeMode) {
+    orbitEyePos.copy(camera.position);
+    if (_btnOrbitMode) _btnOrbitMode.textContent = '👁';
+  } else {
+    if (_btnOrbitMode) _btnOrbitMode.textContent = '🌐';
+  }
+}
+if (_btnOrbitMode) {
+  _btnOrbitMode.addEventListener('touchstart', e => { e.preventDefault(); toggleOrbitEyeMode(); }, { passive: false });
+  _btnOrbitMode.addEventListener('click', () => toggleOrbitEyeMode());
 }
 function updatePhoneButtons() {
   let qIcon, eIcon;
@@ -1554,9 +1613,38 @@ phoneBtn('btn-e', () => {
 });
 
 // ── Mobile orbit gestures (Google Earth style) ───────────────────────────────
+function setOrbitFocusFromScreen(clientX, clientY) {
+  if (orbitEyeMode) return; // eye mode: camera is fixed, no re-centering
+  const ndcX = (clientX / innerWidth) * 2 - 1;
+  const ndcY = -(clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+  let hitPt = null;
+  if (terrain) {
+    const hits = raycaster.intersectObject(terrain, true);
+    if (hits.length > 0) hitPt = hits[0].point.clone();
+  }
+  if (!hitPt) {
+    const ray = raycaster.ray;
+    if (Math.abs(ray.direction.y) > 0.001) {
+      const t = (orbitFocus.y - ray.origin.y) / ray.direction.y;
+      if (t > 0) hitPt = ray.origin.clone().addScaledVector(ray.direction, t);
+    }
+  }
+  if (!hitPt) return;
+  const camPos = camera.position.clone();
+  orbitFocus.copy(hitPt);
+  const offset = camPos.sub(orbitFocus);
+  orbitRadius = Math.max(5, offset.length());
+  orbitPhi    = Math.acos(Math.max(-1, Math.min(1, offset.y / orbitRadius)));
+  orbitTheta  = Math.atan2(offset.x, offset.z);
+}
+
 renderer.domElement.addEventListener('touchstart', e => {
   if (flyMode || playMode || !mobileOrbitActive) return;
-  for (const t of e.changedTouches) orbitLastPos.set(t.identifier, { x: t.clientX, y: t.clientY });
+  // Tag 1-finger touches so focus updates on first move, not on touch-down (avoids camera snap)
+  for (const t of e.changedTouches) {
+    orbitLastPos.set(t.identifier, { x: t.clientX, y: t.clientY, pendingFocus: e.touches.length === 1 });
+  }
   if (e.touches.length === 2) {
     orbitPinchLast = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
     orbitPanLast   = { x: (e.touches[0].clientX + e.touches[1].clientX) / 2, y: (e.touches[0].clientY + e.touches[1].clientY) / 2 };
@@ -1569,6 +1657,10 @@ renderer.domElement.addEventListener('touchmove', e => {
     const t    = e.touches[0];
     const last = orbitLastPos.get(t.identifier);
     if (last) {
+      if (last.pendingFocus) {
+        setOrbitFocusFromScreen(last.x, last.y);
+        last.pendingFocus = false;
+      }
       orbitTheta -= (t.clientX - last.x) * 0.005;
       orbitPhi   -= (t.clientY - last.y) * 0.005;
       orbitPhi    = Math.max(0.05, Math.min(Math.PI * 0.85, orbitPhi));
@@ -1580,31 +1672,37 @@ renderer.domElement.addEventListener('touchmove', e => {
     const panX   = (t0.clientX + t1.clientX) / 2;
     const panY   = (t0.clientY + t1.clientY) / 2;
 
-    // Pinch → zoom toward pinch midpoint in world space
+    // Pinch → zoom
     if (orbitPinchLast > 0) {
       const newRadius = Math.max(5, Math.min(600, orbitRadius * orbitPinchLast / pinch));
-      // Ray from camera through pinch midpoint; intersect horizontal plane at orbitFocus.y
-      const ndcX = (panX / innerWidth) * 2 - 1;
-      const ndcY = -(panY / innerHeight) * 2 + 1;
-      const pinchRay = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position).normalize();
-      if (Math.abs(pinchRay.y) > 0.001) {
-        const tHit = (orbitFocus.y - camera.position.y) / pinchRay.y;
-        if (tHit > 0) {
-          const worldPinch = camera.position.clone().addScaledVector(pinchRay, tHit);
-          // Shift focus so worldPinch stays under the pinch midpoint after radius change
-          orbitFocus.lerpVectors(worldPinch, orbitFocus, newRadius / orbitRadius);
+      if (!orbitEyeMode) {
+        // Zoom toward pinch midpoint in world space (orbit mode only)
+        const ndcX = (panX / innerWidth) * 2 - 1;
+        const ndcY = -(panY / innerHeight) * 2 + 1;
+        const pinchRay = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position).normalize();
+        if (Math.abs(pinchRay.y) > 0.001) {
+          const tHit = (orbitFocus.y - camera.position.y) / pinchRay.y;
+          if (tHit > 0) {
+            const worldPinch = camera.position.clone().addScaledVector(pinchRay, tHit);
+            orbitFocus.lerpVectors(worldPinch, orbitFocus, newRadius / orbitRadius);
+          }
         }
       }
       orbitRadius = newRadius;
     }
 
-    // Two-finger drag → pan focus in ground plane
+    // Two-finger drag → pan left/right and up/down
     const pdx = panX - orbitPanLast.x;
     const pdy = panY - orbitPanLast.y;
     const ps = orbitRadius * 0.002;
     const cr = new THREE.Vector3(Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
-    orbitFocus.addScaledVector(cr, -pdx * ps);
-    orbitFocus.y += pdy * ps;
+    if (orbitEyeMode) {
+      orbitEyePos.addScaledVector(cr, -pdx * ps);
+      orbitEyePos.y += pdy * ps;
+    } else {
+      orbitFocus.addScaledVector(cr, -pdx * ps);
+      orbitFocus.y += pdy * ps;
+    }
 
     orbitPinchLast = pinch;
     orbitPanLast   = { x: panX, y: panY };
@@ -1619,26 +1717,29 @@ renderer.domElement.addEventListener('touchmove', e => {
   }, { passive: true })
 );
 
-// Tap mode label to toggle orbit ↔ kayak on phone
+// Click/tap mode label to toggle orbit ↔ kayak
+modeLabel.style.padding = '10px 14px';
+modeLabel.style.cursor = 'pointer';
+function toggleOrbitKayak() {
+  if (flyMode || modeLabel.style.opacity !== '0.5') return;
+  if (playMode) {
+    playMode = false;
+    if (isTouchDevice) mobileOrbitActive = true;
+    modeLabel.textContent = 'ORBIT';
+    initOrbit();
+    setOrbitUI(true);
+  } else {
+    playMode = true;
+    if (isTouchDevice) mobileOrbitActive = false;
+    if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+    modeLabel.textContent = 'KAYAK';
+    setOrbitUI(false);
+  }
+}
 if (isTouchDevice) {
-  modeLabel.style.padding = '10px 14px'; // larger tap target
-  modeLabel.addEventListener('touchstart', e => {
-    e.preventDefault();
-    if (flyMode) return;
-    if (playMode) {
-      playMode = false;
-      mobileOrbitActive = true;
-      modeLabel.textContent = 'ORBIT';
-      initOrbit();
-      setOrbitUI(true);
-    } else {
-      playMode = true;
-      mobileOrbitActive = false;
-      if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
-      modeLabel.textContent = 'KAYAK';
-      setOrbitUI(false);
-    }
-  }, { passive: false });
+  modeLabel.addEventListener('touchstart', e => { e.preventDefault(); toggleOrbitKayak(); }, { passive: false });
+} else {
+  modeLabel.addEventListener('click', toggleOrbitKayak);
 }
 
 if ('serviceWorker' in navigator) {

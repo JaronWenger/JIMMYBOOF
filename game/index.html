@@ -107,6 +107,14 @@
       right: calc(16px + env(safe-area-inset-right));
       width: 48px; height: 48px; font-size: 20px;
     }
+    #btn-orbit-mode {
+      position: fixed;
+      top: calc(16px + env(safe-area-inset-top));
+      right: calc(16px + env(safe-area-inset-right));
+      width: 48px; height: 48px; font-size: 20px;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
     #mode {
       top: calc(16px + env(safe-area-inset-top));
       left: calc(16px + env(safe-area-inset-left));
@@ -130,6 +138,7 @@
     <button id="go">GO</button>
     <p>WASD paddle &nbsp;·&nbsp; Q roll &nbsp;·&nbsp; E walk</p>
   </div>
+  <button class="action-btn" id="btn-orbit-mode">🌐</button>
   <div id="phone-ui">
     <button class="action-btn" id="btn-reset">↺</button>
     <div id="joystick-zone">
