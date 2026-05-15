@@ -465,10 +465,15 @@ loader.load('./GREATFALLS.glb', ({ scene: gltf }) => {
   snapKayakerToTerrain();
   document.getElementById('loading').style.display = 'none';
   overlay.style.display = 'flex';
+  if (isTouchDevice) {
+    const hint = overlay.querySelector('p');
+    if (hint) hint.style.display = 'none';
+  }
 });
 
 // Kayaker
-let kayakGltf = null;
+let kayakGltf = null;     // Kayaker.glb — physics object + in-boat visual
+let kayakOnlyGltf = null; // Kayak.glb   — used when player is on foot
 let playMode = false;
 let kayakerYaw = 0; // facing downstream (+Z)
 const kayakMat = new THREE.MeshStandardMaterial({ color: 0x2255bb, roughness: 0.25, metalness: 0.1 });
@@ -493,6 +498,17 @@ kayakLoader.load('./Kayaker.glb', ({ scene: gltf }) => {
   snapKayakerToTerrain();
 });
 
+kayakLoader.load('./Kayak.glb', ({ scene: gltf }) => {
+  gltf.traverse(obj => {
+    if (obj.isMesh) obj.material = kayakMat;
+  });
+  gltf.visible = false;
+  scene.add(gltf);
+  kayakOnlyGltf = gltf;
+});
+
+const isTouchDevice = 'ontouchstart' in window;
+
 // Controls
 const fly = new PointerLockControls(camera, renderer.domElement);
 const overlay = document.getElementById('overlay');
@@ -509,6 +525,14 @@ const INTRO_DUR = 2.8;
 
 document.getElementById('go').addEventListener('click', () => {
   overlay.style.display = 'none';
+  requestAnimationFrame(() => requestAnimationFrame(() => { modeLabel.style.opacity = '0.5'; }));
+  if (isTouchDevice) {
+    const phoneUi = document.getElementById('phone-ui');
+    phoneUi.style.display = 'block';
+    phoneUi.style.opacity = '0';
+    phoneUi.style.transition = 'opacity 0.8s ease';
+    requestAnimationFrame(() => requestAnimationFrame(() => { phoneUi.style.opacity = '1'; }));
+  }
   introFromPos.copy(camera.position);
   introFromQuat.copy(camera.quaternion);
 
@@ -535,11 +559,13 @@ fly.addEventListener('lock', () => {
     camera.lookAt(camera.position.clone().add(lookDir));
   }
   modeLabel.textContent = gravityMode ? 'WALK' : 'FLY';
+  updatePhoneButtons();
 });
 
 fly.addEventListener('unlock', () => {
   flyMode = false;
   gravityMode = false;
+  mobileSprint = false;
   walkVelX = 0; walkVelZ = 0;
   if (carryingKayak) { carryingKayak = false; snapKayakerToTerrain(); }
   hideRope(); walkWaterF = 0;
@@ -547,10 +573,11 @@ fly.addEventListener('unlock', () => {
     smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
     playMode = true;
     rollTarget = 0;
-    modeLabel.textContent = 'PLAY';
+    modeLabel.textContent = 'KAYAK';
   } else {
     modeLabel.textContent = 'ORBIT';
   }
+  updatePhoneButtons();
 });
 
 function enterFly() { fly.lock(); }
@@ -616,7 +643,7 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Escape' && !flyMode) {
     playMode = !playMode;
     if (playMode && kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
-    modeLabel.textContent = playMode ? 'PLAY' : 'ORBIT';
+    modeLabel.textContent = playMode ? 'KAYAK' : 'ORBIT';
   }
   if (e.code === 'KeyP') {
     const p = camera.position;
@@ -704,6 +731,24 @@ window.addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+// Mobile touch look (walk mode — pointer lock not available on touch devices)
+let mobileFlyMode = false;
+
+// Mobile orbit state (Google Earth–style)
+let mobileOrbitActive = false;
+let orbitFocus   = new THREE.Vector3(68.6, 0, -279.6);
+let orbitTheta   = 0;          // azimuth
+let orbitPhi     = Math.PI / 3; // elevation
+let orbitRadius  = 80;
+const orbitLastPos  = new Map();
+let orbitPinchLast  = 0;
+let orbitPanLast    = { x: 0, y: 0 };
+let mobileLookYaw = 0;
+let mobileLookPitch = 0.1;
+let lookTouchId = null;
+let lookTouchLastX = 0;
+let lookTouchLastY = 0;
+
 // Gravity / walk
 let gravityMode = false;
 let currentSteepness = 0; // smoothed terrain slope at kayak — drives current force and camera lag
@@ -721,6 +766,8 @@ const FLOW_X = 0.077, FLOW_Z = 0.997;
 let verticalVelocity = 0;
 let isGrounded = false;
 let walkVelX = 0, walkVelZ = 0, walkWaterF = 0;
+let mobileSprint = false;
+let joystickX = 0, joystickY = 0;
 let carryingKayak = false;
 const GRAVITY = -25;
 const PLAYER_HEIGHT = 1.8;
@@ -763,6 +810,16 @@ function triggerBoof() {
   isBoofing = true;
   kayakVelX += Math.sin(kayakerYaw) * 3;
   kayakVelZ += Math.cos(kayakerYaw) * 3;
+}
+
+function initOrbit() {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  orbitFocus.copy(camera.position).addScaledVector(dir, orbitRadius);
+  const offset = camera.position.clone().sub(orbitFocus);
+  orbitRadius = Math.max(10, offset.length());
+  orbitPhi    = Math.acos(Math.max(-1, Math.min(1, offset.y / orbitRadius)));
+  orbitTheta  = Math.atan2(offset.x, offset.z);
 }
 
 function toggleGravity() {
@@ -971,12 +1028,16 @@ function animate() {
     if (!upsideDown) {
       if (keys.has('KeyA')) kayakerYaw += turnSpeed * dt;
       if (keys.has('KeyD')) kayakerYaw -= turnSpeed * dt;
+      kayakerYaw -= joystickX * turnSpeed * dt;
     }
 
     kayakFwd.set(Math.sin(kayakerYaw), 0, Math.cos(kayakerYaw));
 
     // W/S — ease into and out of full speed (disabled upside down)
-    const targetPaddle = (!upsideDown && keys.has('KeyW')) ? moveSpeed : (!upsideDown && keys.has('KeyS')) ? -moveSpeed : 0;
+    const joyFwd = -joystickY;
+    const targetPaddle = !upsideDown
+      ? (keys.has('KeyW') ? moveSpeed : keys.has('KeyS') ? -moveSpeed : joyFwd * moveSpeed)
+      : 0;
     paddleSpeed += (targetPaddle - paddleSpeed) * Math.min(1, dt * 1.5);
     kayakGltf.position.x += Math.sin(kayakerYaw) * paddleSpeed * dt;
     kayakGltf.position.z += Math.cos(kayakerYaw) * paddleSpeed * dt;
@@ -1170,7 +1231,7 @@ function animate() {
     }
   }
 
-  if (flyMode && fly.isLocked) {
+  if (flyMode && (fly.isLocked || mobileFlyMode)) {
     camera.getWorldDirection(fwd);
     right.crossVectors(fwd, worldUp).normalize();
     const boost = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 4 : 1;
@@ -1178,12 +1239,18 @@ function animate() {
 
     if (gravityMode) {
       flatFwd.set(fwd.x, 0, fwd.z).normalize();
-      const sprint = keys.has('KeyE') ? 2.2 : 1;
+      const sprint = (keys.has('KeyE') || mobileSprint) ? 2.2 : 1;
       const ws = 6 * boost * sprint * dt;
       if (keys.has('KeyW')) camera.position.addScaledVector(flatFwd, ws);
       if (keys.has('KeyS')) camera.position.addScaledVector(flatFwd, -ws);
       if (keys.has('KeyD')) camera.position.addScaledVector(right, ws);
       if (keys.has('KeyA')) camera.position.addScaledVector(right, -ws);
+      camera.position.addScaledVector(flatFwd, -joystickY * ws);
+      camera.position.addScaledVector(right,    joystickX * ws);
+
+      if (mobileFlyMode) {
+        camera.quaternion.setFromEuler(new THREE.Euler(mobileLookPitch, mobileLookYaw, 0, 'YXZ'));
+      }
 
       verticalVelocity += GRAVITY * dt;
       camera.position.y += verticalVelocity * dt;
@@ -1243,15 +1310,273 @@ function animate() {
   if (carryingKayak && kayakGltf && flyMode) {
     camera.getWorldDirection(fwd);
     right.crossVectors(fwd, worldUp).normalize();
+    const portrait = innerHeight > innerWidth;
     kayakGltf.position.copy(camera.position)
-      .addScaledVector(right, 1.4)
-      .addScaledVector(fwd, 0.8)
-      .add(new THREE.Vector3(0, 0.3, 0));
+      .addScaledVector(right, portrait ? 0.5 : 1.4)
+      .addScaledVector(fwd,   portrait ? 1.8 : 0.8)
+      .add(new THREE.Vector3(0, portrait ? -0.3 : 0.3, 0));
     const camYaw = Math.atan2(fwd.x, fwd.z);
     kayakGltf.rotation.set(0.1, camYaw + Math.PI / 2, 0, 'YXZ');
     kayakVelX = 0; kayakVelZ = 0; paddleSpeed = 0;
   }
 
+  // Mobile orbit camera
+  if (isTouchDevice && mobileOrbitActive && !playMode && !flyMode) {
+    camera.position.set(
+      orbitFocus.x + orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta),
+      orbitFocus.y + orbitRadius * Math.cos(orbitPhi),
+      orbitFocus.z + orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta)
+    );
+    camera.lookAt(orbitFocus);
+  }
+
+  // Swap Kayaker ↔ Kayak-only model based on whether player is on foot
+  if (kayakGltf && kayakOnlyGltf) {
+    const onFoot = flyMode && gravityMode;
+    kayakGltf.visible = !onFoot;
+    kayakOnlyGltf.visible = onFoot;
+    if (onFoot) {
+      kayakOnlyGltf.position.copy(kayakGltf.position);
+      kayakOnlyGltf.rotation.copy(kayakGltf.rotation);
+      kayakOnlyGltf.scale.copy(kayakGltf.scale);
+    }
+  }
+
+  if (isTouchDevice) updatePhoneButtons();
   renderer.render(scene, camera);
 }
+
+// Prevent pinch-zoom and scroll on touch devices
+document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+
+// ── Phone button icon updates ────────────────────────────────────────────────
+const _btnQ = document.getElementById('btn-q');
+const _btnE = document.getElementById('btn-e');
+function updatePhoneButtons() {
+  let qIcon, eIcon;
+  if (flyMode && gravityMode) {
+    const nearKayak = kayakGltf && camera.position.distanceTo(kayakGltf.position) < 5;
+    if (carryingKayak)   { qIcon = '↓'; eIcon = '⚡'; }
+    else if (nearKayak)  { qIcon = '⬆'; eIcon = '↩'; }
+    else                 { qIcon = '∿'; eIcon = '⚡'; }
+  } else {
+    qIcon = '↺'; eIcon = '⚡';
+  }
+  if (_btnQ.textContent !== qIcon) _btnQ.textContent = qIcon;
+  if (_btnE.textContent !== eIcon) _btnE.textContent = eIcon;
+  _btnE.classList.toggle('toggled', mobileSprint);
+}
+
+// ── Touch look (walk mode only — pointer lock not available on mobile) ────────
+document.addEventListener('touchstart', e => {
+  if (!flyMode || !gravityMode || lookTouchId !== null) return;
+  const t = e.changedTouches[0];
+  const el = document.elementFromPoint(t.clientX, t.clientY);
+  if (el && el.closest('#phone-ui')) return;
+  lookTouchId = t.identifier;
+  lookTouchLastX = t.clientX;
+  lookTouchLastY = t.clientY;
+}, { passive: true });
+
+document.addEventListener('touchmove', e => {
+  if (lookTouchId === null) return;
+  for (const t of e.changedTouches) {
+    if (t.identifier !== lookTouchId) continue;
+    mobileLookYaw   -= (t.clientX - lookTouchLastX) * 0.005;
+    mobileLookPitch -= (t.clientY - lookTouchLastY) * 0.005;
+    mobileLookPitch  = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, mobileLookPitch));
+    lookTouchLastX = t.clientX;
+    lookTouchLastY = t.clientY;
+  }
+}, { passive: true });
+
+['touchend', 'touchcancel'].forEach(ev =>
+  document.addEventListener(ev, e => {
+    for (const t of e.changedTouches) if (t.identifier === lookTouchId) lookTouchId = null;
+  })
+);
+
+// ── Phone controls ───────────────────────────────────────────────────────────
+const joystickZone  = document.getElementById('joystick-zone');
+const joystickThumb = document.getElementById('joystick-thumb');
+const JOY_R = 44;
+let joystickTouchId = null;
+
+function updateJoy(touch) {
+  const r = joystickZone.getBoundingClientRect();
+  const dx = touch.clientX - (r.left + r.width / 2);
+  const dy = touch.clientY - (r.top  + r.height / 2);
+  const len = Math.sqrt(dx*dx + dy*dy) || 1;
+  const clamped = Math.min(len, JOY_R);
+  joystickX = (dx / len) * (clamped / JOY_R);
+  joystickY = (dy / len) * (clamped / JOY_R);
+  joystickThumb.style.transform =
+    `translate(calc(-50% + ${(dx/len)*clamped}px), calc(-50% + ${(dy/len)*clamped}px))`;
+}
+function resetJoy() {
+  joystickX = joystickY = 0;
+  joystickTouchId = null;
+  joystickThumb.style.transform = 'translate(-50%, -50%)';
+}
+
+joystickZone.addEventListener('touchstart', e => {
+  e.preventDefault();
+  joystickTouchId = e.changedTouches[0].identifier;
+  updateJoy(e.changedTouches[0]);
+}, { passive: false });
+joystickZone.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) if (t.identifier === joystickTouchId) updateJoy(t);
+}, { passive: false });
+joystickZone.addEventListener('touchend',   e => { for (const t of e.changedTouches) if (t.identifier === joystickTouchId) resetJoy(); }, { passive: false });
+joystickZone.addEventListener('touchcancel',e => { for (const t of e.changedTouches) if (t.identifier === joystickTouchId) resetJoy(); }, { passive: false });
+
+function phoneBtn(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('touchstart', e => { e.preventDefault(); fn(); }, { passive: false });
+}
+phoneBtn('btn-reset', () => {
+  resetKayak();
+  if (mobileOrbitActive) {
+    mobileOrbitActive = false;
+    playMode = true;
+    modeLabel.textContent = 'KAYAK';
+    if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+  }
+  if (flyMode && gravityMode) {
+    // Exit walk mode and get back in kayak at the top
+    flyMode = false; gravityMode = false; mobileFlyMode = false; mobileSprint = false; lookTouchId = null;
+    carryingKayak = false; hideRope();
+    walkVelX = 0; walkVelZ = 0; walkWaterF = 0; verticalVelocity = 0;
+    playMode = true; rollTarget = 0;
+    modeLabel.textContent = 'KAYAK';
+    if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+  }
+});
+phoneBtn('btn-space', () => {
+  if (introing) { skipIntro(); return; }
+  if (flyMode && gravityMode && isGrounded) { verticalVelocity = 10; isGrounded = false; return; }
+  if (playMode && !flyMode) triggerBoof();
+});
+phoneBtn('btn-q', () => {
+  if (playMode && !flyMode) { triggerRoll(); return; }
+  if (flyMode && gravityMode && kayakGltf) {
+    if (!carryingKayak && camera.position.distanceTo(kayakGltf.position) < 5) {
+      carryingKayak = true; rollTarget = 0; rollAngle = 0; kayakAngVel = 0; hideRope();
+    } else if (carryingKayak) {
+      carryingKayak = false;
+      camera.getWorldDirection(fwd);
+      kayakGltf.position.copy(camera.position).addScaledVector(fwd, 2.5).add(new THREE.Vector3(0, -0.3, 0));
+      const throwYaw = Math.atan2(fwd.x, fwd.z);
+      kayakerYaw = throwYaw;
+      kayakGltf.rotation.set(0, throwYaw + Math.PI / 2, 0, 'YXZ');
+      kayakVelX = fwd.x * 7; kayakVelZ = fwd.z * 7; boofVelY = 4; isBoofing = true;
+    } else if (!ropeActive) { throwRope(); }
+    else { reelRope(); }
+  }
+});
+phoneBtn('btn-e', () => {
+  if (playMode && kayakGltf && !flyMode) {
+    // Enter walk mode — bypass pointer lock on touch devices
+    gravityMode = true; rollTarget = Math.PI; kayakAngVel = 0;
+    flyMode = true; mobileFlyMode = true; mobileSprint = false;
+    camera.position.copy(kayakGltf.position).add(new THREE.Vector3(0, 1.6, 0));
+    mobileLookYaw = Math.PI + kayakerYaw;
+    mobileLookPitch = 0.1;
+    walkVelX = 0; walkVelZ = 0; verticalVelocity = 0; lookTouchId = null;
+    modeLabel.textContent = 'WALK';
+  } else if (flyMode && gravityMode && kayakGltf) {
+    const nearKayak = !carryingKayak && camera.position.distanceTo(kayakGltf.position) < 5;
+    if (nearKayak) {
+      // Get back in kayak
+      flyMode = false; gravityMode = false; mobileFlyMode = false; mobileSprint = false; lookTouchId = null;
+      walkVelX = 0; walkVelZ = 0; walkWaterF = 0;
+      hideRope();
+      smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+      playMode = true; rollTarget = 0;
+      modeLabel.textContent = 'KAYAK';
+    } else {
+      // Toggle sprint
+      mobileSprint = !mobileSprint;
+    }
+  }
+});
+
+// ── Mobile orbit gestures (Google Earth style) ───────────────────────────────
+renderer.domElement.addEventListener('touchstart', e => {
+  if (flyMode || playMode || !mobileOrbitActive) return;
+  for (const t of e.changedTouches) orbitLastPos.set(t.identifier, { x: t.clientX, y: t.clientY });
+  if (e.touches.length === 2) {
+    orbitPinchLast = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
+    orbitPanLast   = { x: (e.touches[0].clientX + e.touches[1].clientX) / 2, y: (e.touches[0].clientY + e.touches[1].clientY) / 2 };
+  }
+}, { passive: true });
+
+renderer.domElement.addEventListener('touchmove', e => {
+  if (flyMode || playMode || !mobileOrbitActive) return;
+  if (e.touches.length === 1) {
+    const t    = e.touches[0];
+    const last = orbitLastPos.get(t.identifier);
+    if (last) {
+      orbitTheta -= (t.clientX - last.x) * 0.005;
+      orbitPhi   -= (t.clientY - last.y) * 0.005;
+      orbitPhi    = Math.max(0.05, Math.min(Math.PI * 0.85, orbitPhi));
+    }
+    orbitLastPos.set(t.identifier, { x: t.clientX, y: t.clientY });
+  } else if (e.touches.length >= 2) {
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const pinch  = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    const panX   = (t0.clientX + t1.clientX) / 2;
+    const panY   = (t0.clientY + t1.clientY) / 2;
+
+    // Pinch → zoom
+    if (orbitPinchLast > 0) orbitRadius = Math.max(5, Math.min(600, orbitRadius * orbitPinchLast / pinch));
+
+    // Two-finger drag → pan focus in ground plane
+    const pdx = panX - orbitPanLast.x;
+    const pdy = panY - orbitPanLast.y;
+    const ps  = orbitRadius * 0.002;
+    const cr  = new THREE.Vector3( Math.cos(orbitTheta), 0, -Math.sin(orbitTheta));
+    const cf  = new THREE.Vector3(-Math.sin(orbitTheta), 0, -Math.cos(orbitTheta));
+    orbitFocus.addScaledVector(cr, -pdx * ps);
+    orbitFocus.addScaledVector(cf, -pdy * ps);
+
+    orbitPinchLast = pinch;
+    orbitPanLast   = { x: panX, y: panY };
+    for (const t of e.changedTouches) orbitLastPos.set(t.identifier, { x: t.clientX, y: t.clientY });
+  }
+}, { passive: true });
+
+['touchend', 'touchcancel'].forEach(ev =>
+  renderer.domElement.addEventListener(ev, e => {
+    for (const t of e.changedTouches) orbitLastPos.delete(t.identifier);
+    if (e.touches.length < 2) orbitPinchLast = 0;
+  }, { passive: true })
+);
+
+// Tap mode label to toggle orbit ↔ kayak on phone
+if (isTouchDevice) {
+  modeLabel.style.padding = '10px 14px'; // larger tap target
+  modeLabel.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (flyMode) return;
+    if (playMode) {
+      playMode = false;
+      mobileOrbitActive = true;
+      modeLabel.textContent = 'ORBIT';
+      initOrbit();
+    } else {
+      playMode = true;
+      mobileOrbitActive = false;
+      if (kayakGltf) smoothLookAt.set(kayakGltf.position.x, kayakGltf.position.y + 1.5, kayakGltf.position.z);
+      modeLabel.textContent = 'KAYAK';
+    }
+  }, { passive: false });
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register(import.meta.env.BASE_URL + 'sw.js').catch(() => {});
+}
+
 animate();
