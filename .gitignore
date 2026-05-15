@@ -17,6 +17,7 @@
 *.glb
 !game/public/GREATFALLS.glb
 !game/public/Kayaker.glb
+!game/public/Kayak.glb
 
 # Blender project files
 *.blend
