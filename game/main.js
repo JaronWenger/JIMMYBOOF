@@ -591,6 +591,7 @@ function skipIntro() {
   playMode = true;
   camera.position.copy(introToPos);
   camera.quaternion.copy(introToQuat);
+  if (isTouchDevice && innerWidth > innerHeight) { camera.fov = 55; camera.updateProjectionMatrix(); }
 }
 renderer.domElement.addEventListener('click', skipIntro);
 
@@ -1047,6 +1048,11 @@ function animate() {
     const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
     camera.position.lerpVectors(introFromPos, introToPos, ease);
     camera.quaternion.slerpQuaternions(introFromQuat, introToQuat, ease);
+    // Lerp FOV for landscape phone kayak so it arrives at 55° with the camera, not after
+    if (isTouchDevice && innerWidth > innerHeight) {
+      const fov = 75 - ease * 20;
+      if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+    }
     if (t >= 1) { introing = false; playMode = true; }
     renderer.render(scene, camera);
     return;
